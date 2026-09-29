@@ -53,14 +53,23 @@ LINKS_JS = """() => {
   const NAV = 'header, nav, footer, aside, [role=navigation], [role=banner], [role=contentinfo], [role=complementary]';
   const MAIN = 'main, article, [role=main], #content, #contents, .content, .contents, #container, .container, table, .board, .bbs';
   const area = (el) => el.closest(NAV) ? 'nav' : (el.closest(MAIN) ? 'main' : 'other');
+  // paging controls: explicitly named containers, or a number/next/prev link among other number links
+  const PAGER = '[class*=paging],[class*=pagination],[class*=pager],[class*=paginate],[class*=page-nav],[class*=pagenav],[class*=page_nav],[class*=page-num],[class*=pagenum],[id*=paging],[id*=pagination],[id*=pager],nav[aria-label*="페이지"],nav[aria-label*="page" i]';
+  const NUMLIKE = /^\\s*(\\d{1,4}|다음|이전|처음|마지막|맨\\s*앞|맨\\s*뒤|next|prev(ious)?|first|last|[<>«»‹›]{1,2})\\s*$/i;
+  const isPager = (el) => {
+    if (el.closest(PAGER)) return true;
+    if (!NUMLIKE.test((el.textContent || '').trim()) || !el.parentElement) return false;
+    return Array.from(el.parentElement.querySelectorAll('a')).filter((a) => /^\\s*\\d{1,4}\\s*$/.test(a.textContent || '')).length >= 2;
+  };
   const out = new Map();
   const add = (u, el) => {
     try {
       if (!u) return;
       const abs = new URL(u, document.baseURI).href;
-      const a = area(el);
+      const a = area(el), pg = isPager(el);
       const prev = out.get(abs);
-      if (!prev || (prev !== 'main' && a === 'main')) out.set(abs, a);
+      if (!prev) out.set(abs, [a, pg]);
+      else out.set(abs, [prev[0] !== 'main' && a === 'main' ? a : prev[0], prev[1] || pg]);
     } catch (e) {}
   };
   for (const a of document.querySelectorAll('a[href], area[href]')) add(a.getAttribute('href'), a);
@@ -70,7 +79,7 @@ LINKS_JS = """() => {
     let m; while ((m = rx.exec(code))) add(m[1], el);
   }
   for (const el of document.querySelectorAll('[data-href], [data-url], [data-link]')) add(el.dataset.href || el.dataset.url || el.dataset.link, el);
-  return Array.from(out, ([url, area]) => [url, area]).slice(0, 3000);
+  return Array.from(out, ([url, v]) => [url, v[0], v[1]]).slice(0, 3000);
 }"""
 
 # Controls that reveal more content (comments, list items). Real links are crawled
@@ -576,8 +585,8 @@ class Scan:
                             if depth == 0 and self.cfg.ocr_enabled:
                                 await self._ocr_stage(ctx, rec, candidates)
                             if self.cfg.follow_links and not self.cancel.is_set():
-                                for link, area in links:
-                                    d = pol.child_depth(rec["url"], link, depth)
+                                for link, area, *rest in links:
+                                    d = pol.child_depth(rec["url"], link, depth, pager=bool(rest and rest[0]))
                                     u = pol.admit(link, d)
                                     if u:
                                         seq += 1
@@ -789,7 +798,7 @@ class Scan:
                     pass
                 if urldefrag(page.url)[0] != start:
                     # the control navigated away: keep the target as a link, reload the page
-                    rec["links"].append((page.url, "main"))
+                    rec["links"].append((page.url, "main", False))
                     rec["expanded"].append(f"(이동 발생: {label})")
                     await page.goto(start, wait_until="domcontentloaded", timeout=self.cfg.nav_timeout_ms)
                     await self._settle(page)

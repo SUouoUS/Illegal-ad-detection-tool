@@ -42,6 +42,7 @@ CONFUSABLE = {
 LEET = {"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "@": "a", "$": "s", "|": "l", "!": "i"}
 
 LATIN_RE = re.compile(r"[A-Za-z]")
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
 
 def _nfkc_char(ch: str) -> str | None:
@@ -85,6 +86,8 @@ def _homoglyph_tokens(raw: str) -> list[Change]:
     Greek words produce changes here but never a HOMOGLYPH finding on their own.
     """
     changes: list[Change] = []
+    # "@" inside an e-mail address (found in the whole text: tokens split at ".") is not a letter
+    email_at = {e.start() + e.group(0).index("@") for e in _EMAIL.finditer(raw)}
     for m in TOKEN_RE.finditer(raw):
         tok = m.group(0)
         mapped = list(tok)
@@ -102,13 +105,64 @@ def _homoglyph_tokens(raw: str) -> list[Change]:
         n_letters = sum(1 for c in mapped if c.isascii() and c.isalpha())
         if n_letters >= 2:
             for k, ch in enumerate(mapped):
-                if ch not in LEET:
+                if ch not in LEET or (m.start() + k) in email_at:   # help@example.kr is an address, not "a"
                     continue
                 prev_l = k > 0 and mapped[k - 1].isascii() and mapped[k - 1].isalpha()
                 next_l = k + 1 < len(mapped) and mapped[k + 1].isascii() and mapped[k + 1].isalpha()
                 if prev_l and next_l:
                     changes.append(Change("leet", m.start() + k, m.start() + k + 1, tok[k], LEET[ch]))
+            changes.extend(_edge_leet(tok, mapped, m.start(), changes))
     return changes
+
+
+_LATIN_WORDS: list[str] | None = None
+
+
+def _latin_words() -> list[str]:
+    """Latin topic words from the rules file (casino, toto, slot ...)."""
+    global _LATIN_WORDS
+    if _LATIN_WORDS is None:
+        import json
+        from pathlib import Path
+        d = json.loads((Path(__file__).with_name("rules") / "ad_rules.json").read_text(encoding="utf-8"))
+        _LATIN_WORDS = sorted({w for c in d["categories"].values()
+                               for lvl in ("latin_strong", "latin_weak") for w in c.get(lvl, []) if len(w) >= 3})
+    return _LATIN_WORDS
+
+
+def _edge_leet(tok: str, mapped: list[str], start: int, done: list[Change]) -> list[Change]:
+    """A single digit at the start or end of a Latin word used as a letter (c4sin0, 5lot).
+    Applied only when it reveals a topic word that was not there before, so model names,
+    codes and years (RTX5090, WIN11, LUCKY7, TEST77) stay as they are."""
+    cur = list(mapped)
+    for c in done:
+        if start <= c.start < start + len(tok):
+            cur[c.start - start] = c.dst
+    letters = sum(1 for c in cur if c.isascii() and c.isalpha())
+    if letters < 3:
+        return []
+    edges = []
+    for k in (0, len(cur) - 1):
+        ch = cur[k]
+        if ch not in "013457" or ch not in LEET:
+            continue
+        inner = k + 1 if k == 0 else k - 1
+        outer = k - 1 if k > 0 else None
+        if not (cur[inner].isascii() and cur[inner].isalpha()):
+            continue                                  # "2026" or "77" at the edge: not a letter stand-in
+        if outer is not None and 0 <= outer < len(cur) and cur[outer].isdigit():
+            continue
+        edges.append(k)
+    if not edges:
+        return []
+    before = "".join(cur).lower()
+    after_l = list(cur)
+    for k in edges:
+        after_l[k] = LEET[cur[k]]
+    after = "".join(after_l).lower()
+    if not any(w in after and w not in before for w in _latin_words()):
+        return []
+    return [Change("leet", start + k, start + k + 1, tok[k], LEET[cur[k]]) for k in edges]
 
 
 def homoglyph_view(raw: str) -> tuple[str, list[Change]]:

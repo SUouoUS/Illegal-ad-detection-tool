@@ -85,6 +85,7 @@ def site_of(host: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+_PAGE_NUM = re.compile(r"(?:(?<=[-_])|(?<=^))\d{1,4}(?=\.\w+$|$)|[-_]\d{1,4}(?=\.\w+$|$)")
 _NUMERIC_SEG = re.compile(r"^(\d+|[0-9a-f]{12,}|[0-9a-f-]{32,36})$", re.I)
 
 
@@ -102,6 +103,7 @@ class Policy:
     skipped_n: dict[str, int] = field(default_factory=dict)      # reason -> unique url count
     admitted: int = 1                                         # entry page counts
     queries: dict[str, list[tuple[frozenset, str]]] = field(default_factory=dict)  # path -> (query set, key)
+    lateral: dict[str, set] = field(default_factory=dict)    # path-paged list -> pages treated as lateral
     superseded: set[str] = field(default_factory=set)        # variant keys whose plain URL came later
 
     def __post_init__(self):
@@ -224,9 +226,46 @@ class Policy:
         diff = {k for k in set(qa) | set(qb) if qa.get(k) != qb.get(k)}
         return bool(diff) and all(k.lower() in PAGE_KEYS for k in diff)
 
-    def child_depth(self, parent: str, link: str, depth: int) -> int:
-        """Moving to another page of the same list is lateral, not one level deeper."""
-        return depth if self.is_pagination(parent, link) else depth + 1
+    @staticmethod
+    def path_page_key(parent: str, link: str) -> str | None:
+        """Path-style paging (list-2.html, /page/3/, list.html -> list_2.html): same site,
+        same query, paths that differ only by a page number in one segment. Returns the
+        list's key, or None."""
+        a, b = urlsplit(parent), urlsplit(link)
+        if site_of(a.netloc) != site_of(b.netloc) or a.path == b.path:
+            return None
+        if sorted(parse_qsl(a.query, keep_blank_values=True)) != sorted(parse_qsl(b.query, keep_blank_values=True)):
+            return None
+        sa, sb = a.path.split("/"), b.path.split("/")
+        if len(sa) != len(sb):
+            return None
+        diff = [k for k, (x, y) in enumerate(zip(sa, sb)) if x != y]
+        if len(diff) != 1:
+            return None
+        x, y = sa[diff[0]], sb[diff[0]]
+        if not (_PAGE_NUM.search(x) or _PAGE_NUM.search(y)):
+            return None
+        strip = lambda t: _PAGE_NUM.sub("", t)  # noqa: E731
+        if strip(x) != strip(y):
+            return None
+        return site_of(b.netloc) + "/".join(sa[:diff[0]] + [strip(y)] + sa[diff[0] + 1:])
+
+    def child_depth(self, parent: str, link: str, depth: int, pager: bool = False) -> int:
+        """Moving to another page of the same list is lateral, not one level deeper:
+        query paging (?page=2) always; path paging (list-2.html) only when the link sits in
+        a paging control. Path-paged lists get at most `per_pattern` lateral pages, so an
+        endless numbered chain still runs into the depth limit."""
+        if self.is_pagination(parent, link):
+            return depth
+        if pager:
+            key = self.path_page_key(parent, link)
+            if key:
+                seen = self.lateral.setdefault(key, set())
+                ck = compare_key(strip_tracking(clean(link)))
+                if ck in seen or len(seen) < self.per_pattern:
+                    seen.add(ck)
+                    return depth
+        return depth + 1
 
     def priority(self, url: str, depth: int, area: str = "other") -> float:
         """Lower is visited first."""
