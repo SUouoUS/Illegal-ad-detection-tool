@@ -1,0 +1,108 @@
+{
+  "_comment": "OCR 평가 기대 결과(탐지기 실행 전 고정). 단위: img 요소 1개. level은 실제 정답 기준(탐지기 설계가 아님). limit=true는 알려진 한계 사례로 채점에서 제외하고 결과만 공개. keywords가 모두 OCR 추출문에 있으면 추출 성공.",
+  "images": {
+    "img/e_ad1.png": {
+      "keywords": [
+        "토토",
+        "JADE3"
+      ],
+      "level": "suspect"
+    },
+    "img/e_ad2_en.png": {
+      "keywords": [
+        "BACCARAT"
+      ],
+      "level": "suspect",
+      "note": "영문 유도 문구(SIGN UP BONUS)"
+    },
+    "img/e_loan.png": {
+      "keywords": [
+        "대출",
+        "fund_demo"
+      ],
+      "level": "suspect"
+    },
+    "img/e_insure.png": {
+      "keywords": [
+        "보험"
+      ],
+      "level": "none"
+    },
+    "img/e_museum.png": {
+      "keywords": [
+        "박물관"
+      ],
+      "level": "none"
+    },
+    "img/e_health.png": {
+      "keywords": [
+        "금연"
+      ],
+      "level": "none"
+    },
+    "img/e_prevent.png": {
+      "keywords": [
+        "도박",
+        "1336"
+      ],
+      "level": "none"
+    },
+    "img/e_news.png": {
+      "keywords": [
+        "배당",
+        "지급"
+      ],
+      "level": "none"
+    },
+    "img/e_split.png": {
+      "keywords": [
+        "파워볼",
+        "LUCK5"
+      ],
+      "level": "uncertain",
+      "note": "주제어와 코드가 떨어져 있음"
+    },
+    "img/e_topic.png": {
+      "keywords": [
+        "슬롯머신"
+      ],
+      "level": "uncertain",
+      "note": "주제어만"
+    },
+    "img/e_small.png": {
+      "keywords": [
+        "안전놀이터"
+      ],
+      "level": "suspect",
+      "note": "13px"
+    },
+    "img/e_lowc.png": {
+      "keywords": [
+        "먹튀검증"
+      ],
+      "level": "suspect",
+      "note": "저대비"
+    },
+    "img/e_jamo.png": {
+      "keywords": [
+        "첫충"
+      ],
+      "level": "suspect",
+      "limit": true,
+      "note": "자모 분해 — 알려진 한계"
+    },
+    "img/e_full.png": {
+      "keywords": [
+        "첫가입"
+      ],
+      "level": "suspect",
+      "limit": true,
+      "note": "전각 영문 — 알려진 한계"
+    },
+    "img/e_missing.png": {
+      "keywords": [],
+      "level": "failed",
+      "note": "없는 파일"
+    }
+  }
+}

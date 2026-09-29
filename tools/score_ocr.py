@@ -27,9 +27,14 @@ def norm(s: str) -> str:
 
 
 def main() -> int:
-    rec_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(sorted(glob.glob(str(ROOT / "runs/*/scan.json")))[-1])
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("record", nargs="?", help="runs/<id>/scan.json (default: latest)")
+    ap.add_argument("--expected", default=str(ROOT / "testsites/ocr/expected.json"))
+    a = ap.parse_args()
+    rec_path = Path(a.record) if a.record else Path(sorted(glob.glob(str(ROOT / "runs/*/scan.json")))[-1])
     rec = json.loads(rec_path.read_text(encoding="utf-8"))
-    exp = json.loads((ROOT / "testsites/ocr/expected.json").read_text(encoding="utf-8"))["images"]
+    exp = json.loads(Path(a.expected).read_text(encoding="utf-8"))["images"]
     o = rec.get("ocr", {})
     print(f"record {rec_path.parent.name} | engine: {o.get('engine_detail', '-')} | total {o.get('total_sec')}s "
           f"(OCR {o.get('ocr_sec')}s, download {o.get('download_sec')}s, reused {o.get('cache_hits')})")
