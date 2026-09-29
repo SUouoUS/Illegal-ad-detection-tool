@@ -120,3 +120,56 @@ def write(doc: dict, path: Path) -> Path:
         raise ValueError("BOM written")
     json.loads(back.decode("utf-8"))
     return path
+
+
+# ------------------------------------------------------------------ result_extra.json
+# Official rule (모집요강 붙임1·3·4): detections outside the four mandatory types go to a
+# separate result_extra.json, technique fixed to "ETC", the participant's type name in
+# extra_finding; evidence_text may describe non-text evidence. Keys follow the official
+# example exactly (no is_violation there).
+EXTRA_KEYS = ("id", "url", "location", "evidence_text", "technique", "extra_finding")
+
+
+def build_extra(entry_url: str, started: datetime, finished: datetime, findings: list[dict],
+                elapsed: float | None = None) -> dict:
+    base = build(entry_url, started, finished, [], elapsed)
+    seen, out = set(), []
+    for f in findings:
+        key = (f["url"], f["location"], f["extra_finding"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"id": f"x_{len(out) + 1:03d}", "url": f["url"], "location": f["location"],
+                    "evidence_text": f["evidence_text"], "technique": "ETC", "extra_finding": f["extra_finding"]})
+    return {"meta": base["meta"], "findings": out}
+
+
+def validate_extra(doc: dict) -> list[str]:
+    errs = [e for e in validate({"meta": doc.get("meta", {}), "findings": []}) if not e.startswith("findings")]
+    if set(doc) != {"meta", "findings"} or not isinstance(doc.get("findings"), list):
+        return errs + ["top-level must be meta + findings(array)"]
+    ids = set()
+    for n, f in enumerate(doc["findings"]):
+        for k in EXTRA_KEYS:
+            if not isinstance(f.get(k), str) or not f.get(k):
+                errs.append(f"findings[{n}].{k} missing or not string")
+        if f.get("technique") != "ETC":
+            errs.append(f"findings[{n}].technique must be ETC")
+        if f.get("id") in ids:
+            errs.append(f"findings[{n}].id duplicated")
+        ids.add(f.get("id"))
+    return errs
+
+
+def write_extra(doc: dict, path: Path) -> Path:
+    errs = validate_extra(doc)
+    if errs:
+        raise ValueError("result_extra schema invalid: " + "; ".join(errs))
+    path = Path(path)
+    data = json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8")
+    fd, tmp = tempfile.mkstemp(prefix=".result_extra_", suffix=".tmp", dir=path.parent)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+    json.loads(path.read_bytes().decode("utf-8"))
+    return path

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import threading
 import time
 import traceback
@@ -19,9 +20,9 @@ from urllib.parse import urldefrag
 
 from playwright.async_api import Browser, Frame, Page, async_playwright
 
-from . import VERSION, result_writer
+from . import VERSION, ocr, result_writer
 from .crawl import Policy
-from .detect import analyze_frame
+from .detect import analyze_frame, judge_image
 from .urlnorm import compare_key
 from .paths import resource_dir, result_dir, runs_dir, setup_browser_env
 
@@ -92,6 +93,58 @@ EXPAND_JS = """() => {
   return out.map(e => (e.innerText || e.value || '').trim().slice(0, 30));
 }"""
 
+# <img> candidates of a document for OCR (entry page only). Picks the URL the browser
+# chose (currentSrc), else the largest srcset candidate, else src; common lazy-loading
+# attributes replace placeholders. DOM visibility is recorded separately from the ad
+# judgement. Elements are kept in window.__cwNodes for selector building.
+IMG_JS = """() => {
+  const imgs = Array.from(document.images);
+  const abs = (u) => { try { return u ? new URL(u, document.baseURI).href : ''; } catch (e) { return ''; } };
+  const bestSrcset = (ss) => {
+    let best = '', score = -1;
+    for (const part of (ss || '').split(',')) {
+      const [u, d] = part.trim().split(/\\s+/);
+      if (!u) continue;
+      const v = d ? parseFloat(d) * (d.endsWith('x') ? 1000 : 1) : 1;
+      if (v > score) { score = v; best = u; }
+    }
+    return best;
+  };
+  const LAZY = ['data-src', 'data-original', 'data-lazy-src', 'data-lazy', 'data-url', 'data-echo'];
+  const placeholder = (u) => !u || /^data:image\\/(gif|svg)/i.test(u) && u.length < 400 || /(blank|spacer|placeholder|loading|transparent)\\.(gif|png|svg)/i.test(u);
+  return imgs.map((im, k) => {
+    // largest srcset candidate reads best; the one the browser displays is kept too
+    const big = bestSrcset(im.getAttribute('srcset'));
+    let u = big || im.currentSrc || im.getAttribute('src') || '';
+    const lazyAttr = LAZY.map((a) => im.getAttribute(a)).find(Boolean) || bestSrcset(im.getAttribute('data-srcset'));
+    let via = big ? 'srcset(최대)' : (im.currentSrc ? 'currentSrc' : 'src');
+    if (placeholder(u) && lazyAttr) { u = lazyAttr; via = 'lazy-attr'; }
+    const r = im.getBoundingClientRect();
+    const hidden = [];
+    let op = 1;
+    for (let e = im; e && e.nodeType === 1; e = e.parentElement) {
+      const cs = getComputedStyle(e);
+      if (cs.display === 'none') { hidden.push('display:none'); break; }
+      if (cs.visibility === 'hidden') hidden.push('visibility:hidden');
+      op *= parseFloat(cs.opacity) || 0;
+    }
+    if (op <= 0.05) hidden.push('opacity:' + op.toFixed(2));
+    if (r.width > 0 && (r.right + scrollX <= 0 || r.bottom + scrollY <= 0)) hidden.push('화면 밖 좌표');
+    return { k, url: u.startsWith('data:') ? u : abs(u), via, shown: abs(im.currentSrc || ''), alt: im.getAttribute('alt') || '',
+             rendered: [Math.round(r.width), Math.round(r.height)], hidden: Array.from(new Set(hidden)) };
+  });
+}"""
+
+# Bot-protection / challenge pages (e.g. Cloudflare Turnstile): the real content was not
+# served. Recognised only to report the reason clearly - they are never bypassed.
+CHALLENGE_JS = """() => ({
+  title: document.title || '',
+  text: (document.body ? document.body.innerText : '').trim().length,
+  frames: Array.from(document.querySelectorAll('iframe')).map(f => f.src || '').filter(Boolean),
+})"""
+CHALLENGE_FRAME = re.compile(r"challenges\.cloudflare\.com|/cdn-cgi/challenge-platform|hcaptcha\.com/captcha|captcha-delivery\.com", re.I)
+CHALLENGE_TITLE = re.compile(r"just a moment|attention required|checking your browser|ddos protection|잠시만 기다|보안 확인", re.I)
+
 SCROLL_JS = """async () => {
   const h = () => Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
   for (let k = 1; k <= 4; k++) { window.scrollTo(0, h() * k / 4); await new Promise(r => setTimeout(r, 120)); }
@@ -133,6 +186,8 @@ class ScanConfig:
     quiet_max_ms: int = 2000         # ... but never wait longer than this
     expand_clicks: int = 12          # safe "load more" clicks per page
     follow_links: bool = True
+    ocr_enabled: bool = False        # text in images of the entry page (optional)
+    ocr_limits: ocr.OcrLimits = field(default_factory=ocr.OcrLimits)
 
 
 @dataclass
@@ -148,6 +203,8 @@ class Progress:
     pages_skipped: int = 0         # links excluded by limits (depth, pattern, page count, time)
     pages_over_limit: int = 0      # queued links beyond the page limit (will not be visited)
     pages_limit_excluded: int = 0  # links excluded by the page limit (queued beyond it + dropped)
+    images_total: int = 0          # OCR: image candidates on the entry page
+    images_done: int = 0
     frames_done: int = 0
     frames_failed: int = 0
     current_url: str = ""
@@ -172,6 +229,9 @@ class Scan:
         self._t0 = 0.0
         self.run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         self.progress.run_id = self.run_id
+        self.images: list[dict] = []
+        self.extra_ads: list[dict] = []          # ad text without any official technique (not in result.json)
+        self.ocr_record: dict = {"enabled": self.cfg.ocr_enabled, "ran": False}
 
     def stop(self):
         self.cancel.set()
@@ -197,9 +257,9 @@ class Scan:
                 state, reason = "stopped", "사용자 중단" + (f" · {limits}" if limits else "")
             else:
                 failed = [pg for pg in pages if pg["status"] not in ("ok", "duplicate")]
-                if pages and all(pg["status"] == "failed" for pg in pages):
+                if pages and all(pg["status"] in ("failed", "blocked", "http_error") for pg in pages):
                     state = "failed"
-                    reason = "페이지를 불러오지 못해 점검하지 못함(광고 없음이 아님): " + pages[0]["error"][:120]
+                    reason = "검사하지 못함 — 본문을 받지 못함(광고 없음이 아님): " + pages[0]["error"][:120]
                 else:
                     reason = "완료" if not failed else f"완료(일부 실패 {len(failed)}건)"
                     if limits:
@@ -213,6 +273,10 @@ class Scan:
         try:
             doc = result_writer.build(self.entry_url, started, finished, findings, elapsed)
             path = result_writer.write(doc, self.out_dir / "result.json")
+            extra_path = None
+            if self.ocr_record.get("ran"):
+                extra = result_writer.build_extra(self.entry_url, started, finished, self._extra_findings(), elapsed)
+                extra_path = result_writer.write_extra(extra, self.out_dir / "result_extra.json")
             self.record = {
                 "tool_version": VERSION, "run_id": self.run_id, "entry_url": self.entry_url,
                 "state": state, "end_reason": reason,
@@ -220,6 +284,9 @@ class Scan:
                 "elapsed_sec": doc["meta"]["elapsed_sec"], "result_path": str(path),
                 "pages": pages, "findings": findings, "excluded": excluded, "errors": p.errors,
                 "crawl": self._crawl_record(),
+                "images": self.images, "ocr": self.ocr_record,
+                "extra_ads": self.extra_ads, "collection": self._collection_summary(pages),
+                "result_extra_path": str(extra_path) if extra_path else "",
                 "result": doc,
             }
             rd = runs_dir() / self.run_id
@@ -258,6 +325,182 @@ class Scan:
             if n:
                 notes.append(f"{label[reason]} {n}개")
         return ", ".join(notes)
+
+    # -------------------------------------------------------------- OCR (entry page)
+    async def _collect_images(self, page: Page, page_url: str) -> list[dict]:
+        frame = page.main_frame
+        cands = await self._ev(frame, "() => { const r = (" + IMG_JS + ")(); window.__cwNodes = Array.from(document.images); return r; }")
+        if cands:
+            sels = await self._ev(frame, SELECTOR_JS, [c["k"] for c in cands])
+            by = {x["index"]: x for x in sels}
+            for c in cands:
+                sel = by.get(c["k"], {})
+                c["selector"] = sel.get("selector") or ""
+                c["selector_verified"] = bool(sel.get("verified"))
+                c["page_url"] = page_url
+        return cands
+
+    async def _fetch_image(self, ctx, url: str, referer: str) -> tuple[bytes | None, str]:
+        lim = self.cfg.ocr_limits
+        if url.startswith("data:"):
+            import base64
+            head, _, body = url.partition(",")
+            try:
+                data = base64.b64decode(body) if ";base64" in head else body.encode("latin-1")
+            except Exception:  # noqa: BLE001
+                return None, "data URL을 해석하지 못함"
+            return (data, "") if len(data) <= lim.max_bytes else (None, f"파일 크기 한도 초과({len(data):,}B)")
+        if not url.startswith(("http://", "https://")):
+            return None, "지원하지 않는 주소 형식(blob 등)"
+        try:
+            resp = await ctx.request.get(url, headers={"Referer": referer}, timeout=lim.download_timeout_s * 1000,
+                                         max_redirects=5, fail_on_status_code=False)
+        except Exception as e:  # noqa: BLE001
+            msg = str(e).splitlines()[0]
+            return None, "내려받기 시간 초과" if "Timeout" in msg else f"내려받기 실패: {msg[:80]}"
+        try:
+            if resp.status >= 400:
+                return None, f"HTTP {resp.status}"
+            size = int(resp.headers.get("content-length") or 0)
+            if size > lim.max_bytes:
+                return None, f"파일 크기 한도 초과({size:,}B)"
+            data = await resp.body()
+            if len(data) > lim.max_bytes:
+                return None, f"파일 크기 한도 초과({len(data):,}B)"
+            ctype = resp.headers.get("content-type", "")
+            if "svg" in ctype:
+                return None, "SVG 이미지는 지원하지 않음"
+            return data, ""
+        finally:
+            await resp.dispose()
+
+    async def _ocr_stage(self, ctx, rec: dict, candidates: list[dict] | None):
+        """OCR every <img> of the entry page within its own time budget. Failures are
+        recorded per image and never affect the text results already collected."""
+        lim = self.cfg.ocr_limits
+        p = self.progress
+        ok, msg = ocr.engine_status()
+        self.ocr_record.update({"engine": ocr.ENGINE, "engine_detail": msg, "limits": lim.as_dict(),
+                                "page_url": rec.get("url", ""), "available": ok})
+        if not ok:
+            self.ocr_record["error"] = msg
+            return
+        if candidates is None:
+            self.ocr_record["error"] = "진입 페이지를 불러오지 못해 이미지를 수집하지 못함"
+            return
+        self.ocr_record["ran"] = True
+        t0 = time.monotonic()
+        img_dir = runs_dir() / self.run_id / "images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        fetched: dict[str, tuple[bytes | None, str]] = {}
+        done: dict[str, dict] = {}                  # sha1 -> OCR result reused for repeated images
+        p.images_total = len(candidates)
+        stats = {"ocr_sec": 0.0, "download_sec": 0.0, "cache_hits": 0}
+        for n, c in enumerate(candidates):
+            item = {"page_url": c.get("page_url", ""), "selector": c.get("selector", ""),
+                    "selector_verified": c.get("selector_verified", False), "img_url": c.get("url", ""),
+                    "src_via": c.get("via", ""), "shown_src": c.get("shown", ""), "alt": c.get("alt", ""), "rendered": c.get("rendered"),
+                    "dom_hidden": c.get("hidden", []), "status": "ok", "reason": "", "timing": {}}
+            self.images.append(item)
+            p.images_done = n
+            if self.cancel.is_set():
+                item.update(status="stopped", reason="사용자 중단")
+                continue
+            if time.monotonic() - t0 > lim.total_budget_s or self._remaining() < 15:
+                item.update(status="timeout", reason=f"이미지 검사 전체 시간 한도({lim.total_budget_s:.0f}초) 도달")
+                continue
+            if n >= lim.max_images:
+                item.update(status="skipped", reason=f"이미지 수 한도({lim.max_images}개) 초과")
+                continue
+            url = item["img_url"]
+            if not url:
+                item.update(status="skipped", reason="이미지 주소 없음")
+                continue
+            try:
+                await asyncio.wait_for(self._ocr_one(ctx, item, url, fetched, done, img_dir, stats),
+                                       timeout=lim.download_timeout_s + 20)
+            except asyncio.TimeoutError:
+                item.update(status="timeout", reason="이미지 한 장 처리 시간 초과")
+            except Exception as e:  # noqa: BLE001
+                item.update(status="failed", reason=f"처리 오류: {str(e).splitlines()[0][:120]}")
+        p.images_done = len(candidates)
+        self.ocr_record.update({"total_sec": round(time.monotonic() - t0, 2), **{k: round(v, 3) if isinstance(v, float) else v for k, v in stats.items()},
+                                "counts": {s: sum(1 for i in self.images if i["status"] == s) for s in ("ok", "skipped", "failed", "timeout", "stopped")},
+                                "levels": {lv: sum(1 for i in self.images if i.get("level") == lv) for lv in ("suspect", "uncertain", "none")}})
+
+    async def _ocr_one(self, ctx, item, url, fetched, done, img_dir, stats):
+        lim = self.cfg.ocr_limits
+        t = time.monotonic()
+        if url not in fetched:
+            fetched[url] = await self._fetch_image(ctx, url, item["page_url"])
+        data, why = fetched[url]
+        item["timing"]["download"] = round(time.monotonic() - t, 3)
+        stats["download_sec"] += item["timing"]["download"]
+        if data is None:
+            item.update(status="failed" if not why.startswith(("파일 크기", "SVG", "지원하지")) else "skipped", reason=why)
+            return
+        h = ocr.sha1(data)
+        item.update(sha1=h, bytes=len(data))
+        if h in done:                                # same image content: reuse OCR, keep own location
+            stats["cache_hits"] += 1
+            item.update({k: v for k, v in done[h].items() if k not in ("timing",)}, cache_hit=True)
+            return
+        t = time.monotonic()
+        try:
+            prep = await asyncio.to_thread(ocr.prepare, data, lim)
+        except ValueError as e:
+            item.update(status="failed", reason=str(e))
+            done[h] = {"status": "failed", "reason": str(e)}
+            return
+        item["timing"]["prepare"] = round(time.monotonic() - t, 3)
+        w0, h0 = prep.orig_size
+        item.update(natural=[w0, h0], prep_note=prep.note, scale=round(prep.scale, 3))
+        if w0 < lim.min_natural[0] or h0 < lim.min_natural[1]:
+            item.update(status="skipped", reason=f"아이콘 크기 이미지({w0}×{h0})")
+            done[h] = {k: item[k] for k in ("status", "reason", "natural")}
+            return
+        (img_dir / f"{h}.jpg").write_bytes(prep.thumb_jpeg)
+        item["preview"] = f"{h}.jpg"
+        t = time.monotonic()
+        lines = await ocr.recognize(prep.png)
+        item["timing"]["ocr"] = round(time.monotonic() - t, 3)
+        stats["ocr_sec"] += item["timing"]["ocr"]
+        blocks = ocr.blocks(lines)
+        for b in blocks:                              # back to original image pixels
+            for k in ("x", "y", "w", "h"):
+                b[k] = round(b[k] / prep.scale, 1)
+        verdict = judge_image(blocks)
+        item.update(ocr_text="\n".join(b["text"] for b in blocks), ocr_blocks=blocks, level=verdict["level"],
+                    verdict=verdict)
+        done[h] = {k: item[k] for k in ("status", "reason", "natural", "prep_note", "scale", "preview",
+                                        "ocr_text", "ocr_blocks", "level", "verdict")}
+
+    def _extra_findings(self) -> list[dict]:
+        """result_extra.json rows: only images whose own text block meets the ad rules."""
+        out = []
+        for im in self.images:
+            if im.get("level") != "suspect" or not im.get("selector"):
+                continue
+            b = im["ocr_blocks"][im["verdict"]["block"]]["text"] if im["verdict"].get("block") is not None else im.get("ocr_text", "")
+            out.append({"url": im["page_url"], "location": im["selector"],
+                        "evidence_text": f"OCR 추출문: {b} (이미지: {im['img_url'][:300]})",
+                        "extra_finding": "IMAGE_TEXT_AD(이미지 속 광고 의심 문구)"})
+        return out
+
+    def _collection_summary(self, pages: list[dict]) -> dict:
+        """What was actually collected, so '0 findings' can be told apart from 'not scanned'."""
+        st = lambda k: sum(1 for pg in pages if pg["status"] == k)  # noqa: E731
+        o = self.ocr_record
+        return {
+            "text": {"pages": len(pages), "ok": st("ok") + st("partial"), "duplicate": st("duplicate"),
+                     "blocked": st("blocked"), "http_error": st("http_error"), "failed": st("failed"), "stopped": st("stopped"),
+                     "elements": self.progress.elements},
+            "images": {"enabled": bool(o.get("enabled")), "ran": bool(o.get("ran")), "error": o.get("error", ""),
+                       "found": len(self.images), **{k: sum(1 for i in self.images if i["status"] == k)
+                                                    for k in ("ok", "failed", "skipped", "timeout", "stopped")}},
+            "extra_ads": {"text": len(self.extra_ads),
+                          "image": sum(1 for i in self.images if i.get("level") in ("suspect", "uncertain"))},
+        }
 
     def _crawl_record(self) -> dict:
         pol = getattr(self, "policy", None)
@@ -329,6 +572,9 @@ class Scan:
                             pages.append(rec)
                             if depth == 0 and rec["status"] != "failed":
                                 pol.allow_site_of(rec["url"])
+                            candidates = rec.pop("_images", None)
+                            if depth == 0 and self.cfg.ocr_enabled:
+                                await self._ocr_stage(ctx, rec, candidates)
                             if self.cfg.follow_links and not self.cancel.is_set():
                                 for link, area in links:
                                     d = pol.child_depth(rec["url"], link, depth)
@@ -407,7 +653,7 @@ class Scan:
                 rec["status"] = "failed"
                 rec["error"] = f"페이지 처리 시간 초과({budget:.0f}초) — 일부만 점검됨"
             rec["elapsed_sec"] = round(loop.time() - t_start, 2)
-            if rec["status"] in ("failed", "stopped", "http_error"):
+            if rec["status"] in ("failed", "stopped", "http_error", "blocked"):
                 p.pages_failed += 1
             elif rec["status"] != "duplicate":
                 p.pages_done += 1
@@ -444,6 +690,10 @@ class Scan:
             return
         await self._settle(page)
         lap("settle")
+        why = await self._challenge_reason(page, rec.get("http_status"))
+        if why:
+            rec["status"], rec["error"] = "blocked", why
+            return
         final = urldefrag(page.url)[0]
         rec["url"] = final
         key = compare_key(final)
@@ -457,8 +707,29 @@ class Scan:
         lap("expand")
         await self._walk(page.main_frame, [], final, rec, findings, excluded, 0)
         lap("analyse")
+        if rec.get("depth") == 0 and self.cfg.ocr_enabled:
+            try:
+                rec["_images"] = await self._collect_images(page, final)
+            except Exception as e:  # noqa: BLE001 - OCR must never cost the text results
+                rec["_images"] = []
+                self.ocr_record["collect_error"] = str(e).splitlines()[0]
+            lap("images")
         if rec["status"] == "ok" and rec["error"]:
             rec["status"] = "partial"
+
+    async def _challenge_reason(self, page: Page, status) -> str:
+        try:
+            info = await self._ev(page.main_frame, CHALLENGE_JS)
+        except Exception:  # noqa: BLE001
+            return ""
+        frame = any(CHALLENGE_FRAME.search(u) for u in info["frames"] + [f.url for f in page.frames])
+        title = bool(CHALLENGE_TITLE.search(info["title"]))
+        # only explicit evidence of a security check (challenge frame or challenge title);
+        # a short 403/429/503 page alone is reported as a plain response error
+        if (status in (403, 429, 503) and (frame or title)) or (title and frame):
+            code = f"HTTP {status} · " if status else ""
+            return f"{code}보안 확인(봇 차단) 화면이 표시되어 본문을 받지 못함(자동 검사 불가 사이트)"
+        return ""
 
     async def _settle(self, page: Page):
         # 'load' and network quiet are waited for only briefly: ad-heavy pages never go quiet
@@ -545,7 +816,8 @@ class Scan:
             finfo["elements"] = len(nodes)
             p.elements += len(nodes)
             # CPU work off the event loop so other pages keep loading meanwhile
-            cands, excl = await asyncio.to_thread(analyze_frame, nodes)
+            visible: list[dict] = []
+            cands, excl = await asyncio.to_thread(analyze_frame, nodes, True, visible)
             if cands:
                 sels = await self._ev(frame, SELECTOR_JS, [c.index for c in cands])
                 sel_by = {s["index"]: s for s in sels}
@@ -567,6 +839,22 @@ class Scan:
                     finfo["findings"] += 1
             for x in excl:
                 excluded.append({"url": page_url, "frame_chain": list(chain), **x})
+            if visible:
+                vsels = await self._ev(frame, SELECTOR_JS, [x["index"] for x in visible])
+                vby = {x["index"]: x for x in vsels}
+                known = {(e["url"], e["location"]) for e in self.extra_ads}
+                for x in visible:
+                    sel = vby.get(x["index"], {})
+                    if not sel.get("selector"):
+                        continue
+                    loc = " >>> ".join(chain + [sel["selector"]])
+                    if (page_url, loc) in known:
+                        continue
+                    known.add((page_url, loc))
+                    self.extra_ads.append({"kind": "text", "url": page_url, "location": loc,
+                                           "evidence_text": x["evidence"], "restored_text": x["restored"],
+                                           "ad_reasons": x["ad_reasons"], "excluded_why": x["excluded_why"],
+                                           "selector_verified": bool(sel.get("verified")), "frame_chain": list(chain)})
             p.frames_done += 1
             p.findings = len({(f["url"], f["location"], f["technique"]) for f in findings})
         except Exception as e:  # noqa: BLE001

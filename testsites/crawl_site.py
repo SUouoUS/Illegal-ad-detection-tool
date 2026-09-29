@@ -158,6 +158,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, page("로그아웃", '<p>로그아웃되었습니다.</p><span style="opacity:0">카지노 가입코드 TRAP1 즉시 지급</span>'))
         if path in ("/board/delete", "/board/write"):
             return self._send(200, page("처리", "<p>처리되었습니다.</p>"))
+        # four cases for telling "0 findings" apart (fake data only)
+        promo = "토토사이트 가입코드 TEST77 첫충 20% 지급 문의 텔레 @test_demo"
+        if path == "/case/visible":
+            return self._send(200, page("홍보", f'<div class="post"><p class="promo">{promo}</p></div>'))
+        if path == "/case/hidden":
+            return self._send(200, page("홍보", f'<div class="post"><p>행사 안내</p><p class="promo" style="display:none">{promo}</p></div>'))
+        if path == "/case/news":
+            return self._send(200, page("뉴스", '<article class="news"><h3>경찰, 불법 도박 사이트 운영 조직 검거…텔레그램으로 회원 모집</h3>'
+                                                 '<p>게임사, 50억 원 규모 현금배당 결정</p>'
+                                                 '<p class="prevent">불법 도박은 범죄입니다. 도박 문제는 1336에서 상담하세요.</p></article>'))
+        if path == "/case/denied":                     # plain refusal: short 403 without any security-check page
+            return self._send(403, "<!doctype html><html><head><meta charset='utf-8'><title>403 Forbidden</title></head><body><h1>Forbidden</h1></body></html>")
+        if path == "/challenge":                       # imitation of a bot-protection page (local, no real vendor)
+            return self._send(403, "<!doctype html><html><head><meta charset='utf-8'><title>Just a moment...</title></head>"
+                                   "<body><p>Checking your browser before accessing the site.</p>"
+                                   "<iframe src='/cdn-cgi/challenge-platform/h/b/turnstile/test'></iframe></body></html>")
+        if path.startswith("/cdn-cgi/challenge-platform/"):
+            return self._send(200, "<!doctype html><html><body>verify</body></html>")
         if path == "/__hits":
             return self._send(200, json.dumps(HITS, ensure_ascii=False), "application/json")
         return self._send(404, page("없음", "<p>페이지가 없습니다.</p>"))

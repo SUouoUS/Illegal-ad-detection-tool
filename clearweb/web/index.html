@@ -40,6 +40,8 @@
         <label>최대 페이지 수 <input type="number" id="opt-pages" min="1" max="2000" step="1"></label>
         <label>전체 시간 한도(분) <input type="number" id="opt-budget" min="1" max="29" step="1"></label>
         <span class="opts-hint">깊이 0은 입력한 페이지만 검사합니다. 목록의 다음 쪽 이동은 깊이를 늘리지 않습니다.</span>
+        <label class="opt-check"><input type="checkbox" id="opt-ocr"> 이미지 속 글자 검사 — 진입 페이지만, 검사 시간 증가</label>
+        <span class="opts-hint" id="ocr-status"></span>
       </div>
     </details>
   </form>
@@ -59,6 +61,8 @@
       <dt>프레임</dt><dd id="sd-frames">-</dd>
       <dt>종료 사유</dt><dd id="sd-reason">-</dd>
       <dt>건너뛴 링크</dt><dd id="sd-skipped">-</dd>
+      <dt>텍스트 수집</dt><dd id="sd-text">-</dd>
+      <dt>이미지·OCR</dt><dd id="sd-img">-</dd>
       <dt>결과 파일</dt><dd id="sd-result">-</dd>
     </dl>
     <table class="mini" id="pages" hidden><thead><tr><th>상태</th><th>주소</th><th>비고</th></tr></thead><tbody></tbody></table>
@@ -73,6 +77,20 @@
     </div>
     <ul class="results" id="results" role="listbox" aria-label="탐지 결과 목록"></ul>
     <p class="empty" id="empty">점검할 웹 주소를 입력하고 검사를 시작하세요.</p>
+    <section class="img-section" id="img-section" hidden aria-label="추가 의심 광고">
+      <div class="list-head sub-head">
+        <h2>추가 의심 광고</h2>
+        <p class="counts" id="img-counts"></p>
+      </div>
+      <p class="hint extra-hint">광고로 의심되지만 공식 결과(result.json)에는 넣지 않은 참고 항목입니다. 불법으로 확정한 것이 아닙니다.</p>
+      <ul class="results" id="img-results" role="listbox" aria-label="추가 의심 광고 목록"></ul>
+      <p class="empty" id="img-empty" hidden></p>
+      <details class="sub-section" id="img-log-box">
+        <summary>이미지 처리 내역 <span id="img-log-count"></span></summary>
+        <p class="hint" id="img-engine"></p>
+        <table class="mini" id="img-log"><thead><tr><th>결과</th><th>이미지</th><th>사유·처리</th></tr></thead><tbody></tbody></table>
+      </details>
+    </section>
     <details class="sub-section" id="excluded-box" hidden>
       <summary>제외한 숨김 문구 <span id="excluded-count"></span></summary>
       <p class="hint">숨겨져 있지만 예방·보도·안내 문맥으로 판단해 결과에서 뺀 문구입니다.</p>
@@ -85,7 +103,7 @@
     <div id="detail-body" hidden>
       <div class="d-head">
         <p class="d-title" id="d-title"></p>
-        <p class="d-type"><b>불법 광고 유형:</b> <span id="d-types"></span></p>
+        <p class="d-type"><b id="d-type-label">불법 광고 유형:</b> <span id="d-types"></span></p>
       </div>
 
       <section class="d-block">
@@ -100,6 +118,10 @@
       <section class="d-block">
         <h3>광고로 의심한 이유</h3>
         <p class="why" id="d-why"></p>
+      </section>
+      <section class="d-block" id="d-excl-wrap" hidden>
+        <h3>공식 결과에서 제외된 이유</h3>
+        <p id="d-excl"></p>
       </section>
 
       <section class="d-block">
@@ -118,6 +140,44 @@
           <dt>프레임 경로</dt><dd id="t-frame"></dd>
           <dt>위치 검증</dt><dd id="t-verified"></dd>
         </dl>
+      </details>
+    </div>
+    <div id="img-detail" hidden>
+      <div class="d-head">
+        <p class="d-title" id="i-title"></p>
+        <p class="d-type"><b>이미지 판정:</b> <span id="i-level"></span></p>
+      </div>
+      <section class="d-block">
+        <h3>수집한 이미지</h3>
+        <img class="i-preview" id="i-preview" alt="수집 시점의 이미지 미리보기">
+        <p class="hint" id="i-preview-note">검사할 때 저장한 사본입니다. 원래 주소로 다시 요청하지 않습니다.</p>
+      </section>
+      <section class="d-block">
+        <h3>OCR 추출문</h3>
+        <ol class="i-blocks" id="i-blocks"></ol>
+        <p class="hint">이미지에서 인식한 글자로, 원문이 아닙니다. 잘못 읽은 글자가 있을 수 있습니다.</p>
+      </section>
+      <section class="d-block">
+        <h3>광고로 의심한 이유</h3>
+        <p class="why" id="i-why"></p>
+        <ul class="plain" id="i-reasons"></ul>
+      </section>
+      <section class="d-block">
+        <h3>공식 결과에서 제외된 이유</h3>
+        <p id="i-excl"></p>
+      </section>
+      <section class="d-block">
+        <h3>발견 위치</h3>
+        <dl class="kv">
+          <dt>페이지</dt><dd><a id="i-page" target="_blank" rel="noopener noreferrer"></a></dd>
+          <dt>이미지 주소</dt><dd id="i-src"></dd>
+          <dt>요소 선택자</dt><dd><code id="i-loc"></code></dd>
+        </dl>
+        <button type="button" class="btn small" id="i-copy">선택자 복사</button>
+      </section>
+      <details class="d-tech">
+        <summary>처리 정보</summary>
+        <dl class="kv" id="i-proc"></dl>
       </details>
     </div>
   </aside>
@@ -149,6 +209,7 @@
       <li>로그인·회원가입·검색·글쓰기·추천·신고·내려받기·인쇄 링크처럼 검사 가치가 낮거나 상태를 바꿀 수 있는 링크는 건너뜁니다. 같은 형태의 주소(예: 게시글 보기)는 형태별로 10개까지만 검사합니다.</li>
       <li>한도에 도달하면 멈추고, 한도 때문에 제외한 링크 수를 상태줄과 ‘검사 상세’에 표시합니다.</li>
       <li>링크 없이 스크립트 함수로만 이동하는 게시판 등 일부 페이지는 찾지 못할 수 있습니다.</li>
+      <li>‘검사 설정’에서 <b>이미지 속 글자 검사</b>를 켜면 입력한 페이지 한 개의 이미지(img)에서 글자를 인식해 광고 의심 여부를 따로 보여줍니다. 배경 이미지, 하위 페이지의 이미지, 동영상은 검사하지 않습니다. 인식한 글자(OCR 추출문)는 원문이 아니며, 이미지 결과는 확정 판정이 아닙니다.</li>
       <li>페이지를 불러오지 못하면 ‘점검 실패’ 또는 ‘일부 실패’로 표시합니다. 이 경우 광고가 없다는 뜻이 아닙니다.</li>
       <li>검사 결과 파일(result.json)은 검사가 끝나면 프로그램 폴더에 자동으로 저장됩니다. 경로는 ‘검사 상세’에서 확인할 수 있습니다.</li>
     </ul>
