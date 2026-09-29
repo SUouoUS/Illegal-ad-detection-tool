@@ -1,0 +1,60 @@
+{
+  "_comment": "크롤링 테스트 사이트 정답(testsites/crawl_site.py). 진입 URL은 /. /logout, /board/delete 는 요청되면 안 됨.",
+  "entry": "/",
+  "answers": [
+    {
+      "url": "/notice",
+      "location": "div.notice-body > p.ind",
+      "technique": "OFFSCREEN",
+      "note": "text-indent -9999px"
+    },
+    {
+      "url": "/board/list?page=3",
+      "location": "table.board > tbody > tr:nth-of-type(3) > td.subj > span.blind",
+      "technique": "OFFSCREEN",
+      "note": "3쪽 목록 안 숨김(페이지 이동 필요)"
+    },
+    {
+      "url": "/board/view?id=2",
+      "location": "ul.cmt-list > li:nth-of-type(2) > p.cmt-body",
+      "technique": "HOMOGLYPH",
+      "note": "JS로 불러온 댓글"
+    },
+    {
+      "url": "/board/list?page=1",
+      "location": "table.board > tbody > tr:nth-of-type(3) > td.subj > a",
+      "technique": "JAMO",
+      "note": "같은 제목이 목록에도 노출됨(공식 예시도 목록 제목을 정답으로 봄)"
+    },
+    {
+      "url": "/board/view?id=3",
+      "location": "article.view > h3.view-title",
+      "technique": "JAMO",
+      "note": "게시글 제목"
+    },
+    {
+      "url": "/board/view?id=4",
+      "location": "ul.cmt-list > li:nth-of-type(4) > p.cmt-body > span.tiny",
+      "technique": "OFFSCREEN",
+      "note": "댓글 더보기를 눌러야 나타남"
+    },
+    {
+      "url": "/board/view?id=5",
+      "location": "iframe[src=\"{BASE}widget/banner?id=5\"] >>> iframe[src=\"{BASE}widget/inner?id=5\"] >>> div.frame-box > p.same",
+      "technique": "TRANSPARENT",
+      "note": "중첩 iframe, 배경색과 같은 글자"
+    },
+    {
+      "url": "/board/view?id=6",
+      "location": "p.late-msg > span.late",
+      "technique": "TRANSPARENT",
+      "note": "로드 800ms 후 JS로 삽입"
+    },
+    {
+      "url": "/board/view.do?nttId=501&bbsId=B01",
+      "location": "div.view-body > p > em.ghost",
+      "technique": "TRANSPARENT",
+      "note": "onclick 링크, 쿼리 순서 다름"
+    }
+  ]
+}

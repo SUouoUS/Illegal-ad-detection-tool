@@ -1,0 +1,30 @@
+{
+  "_comment": "콘텐츠 경계·연락 수단 오탐 회귀 테스트(ruliweb 오탐 재현 구조). 정답은 실제 광고 4건(기법 4건). 나머지 숨겨진 뉴스·대회명·모델명 문구는 모두 정상이며 검출되면 오탐.",
+  "entry": "/",
+  "answers": [
+    {
+      "url": "/",
+      "location": "p.promo-split",
+      "technique": "OFFSCREEN",
+      "note": "여러 span 으로 나뉜 광고 한 문장"
+    },
+    {
+      "url": "/",
+      "location": "div.event-note",
+      "technique": "TRANSPARENT",
+      "note": "명시적 가입코드 BET2026"
+    },
+    {
+      "url": "/",
+      "location": "#hot_tab li:nth-of-type(2) > a.subject",
+      "technique": "OFFSCREEN",
+      "note": "정상 뉴스 목록 사이 광고 항목"
+    },
+    {
+      "url": "/",
+      "location": "nav.gnb a.sub-link",
+      "technique": "OFFSCREEN",
+      "note": "숨겨진 메뉴 안의 광고"
+    }
+  ]
+}

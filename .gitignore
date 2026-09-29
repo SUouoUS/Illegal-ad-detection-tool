@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+/runs/
+/result.json
+/result_extra.json
+/build/
+/dist/
+.pytest_cache/
+# secrets / credentials
+.env
+.env.*
+*.pem
+*.key
+credentials*.json
+# bundled browsers and build outputs
+/browsers/
+ms-playwright/
+*.spec.bak
+# logs and temp files written during scans
+*.log
+*.tmp

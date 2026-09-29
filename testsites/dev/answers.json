@@ -1,0 +1,22 @@
+{
+  "_comment": "개발용 정답. {BASE}는 채점 시 테스트 서버 주소로 치환됨. location은 정답 작성자가 직접 쓴 선택자이며, 채점기는 요소 동일성으로 비교함.",
+  "entry": "/",
+  "answers": [
+    {"url": "/", "location": "table.board-list > tbody > tr:nth-of-type(3) > td.subject > a", "technique": "JAMO", "note": "게시판 제목 자모 분해"},
+    {"url": "/", "location": "table.board-list > tbody > tr:nth-of-type(5) > td.subject > a", "technique": "HOMOGLYPH", "note": "전각 영문"},
+    {"url": "/", "location": "ul.comment-list > li:nth-of-type(2) > p.comment-text", "technique": "HOMOGLYPH", "note": "키릴 문자 혼용 댓글"},
+    {"url": "/", "location": "article.article-body > p.desc > span.promo-note", "technique": "TRANSPARENT", "note": "스타일시트 opacity:0"},
+    {"url": "/", "location": "div.info-box > p.tip", "technique": "TRANSPARENT", "note": "배경과 같은 글자색"},
+    {"url": "/", "location": "p.ref > em.ghost", "technique": "TRANSPARENT", "note": "color:transparent"},
+    {"url": "/", "location": "div.side-link", "technique": "OFFSCREEN", "note": "left:-9999px"},
+    {"url": "/", "location": "p.footer-note > span.fs0", "technique": "OFFSCREEN", "note": "font-size:0"},
+    {"url": "/", "location": "p.loan-line > span.tiny", "technique": "OFFSCREEN", "note": "font-size:1px"},
+    {"url": "/", "location": "div.old-banner", "technique": "OFFSCREEN", "note": "상위 display:none (은닉 루트를 정답으로 가정)"},
+    {"url": "/", "location": "span.c-mix", "technique": "JAMO", "note": "복합: 자모+투명"},
+    {"url": "/", "location": "span.c-mix", "technique": "TRANSPARENT", "note": "복합: 자모+투명"},
+    {"url": "/", "location": "a.f-link", "technique": "HOMOGLYPH", "note": "복합: 전각+화면 밖"},
+    {"url": "/", "location": "a.f-link", "technique": "OFFSCREEN", "note": "복합: 전각+화면 밖"},
+    {"url": "/", "location": "iframe[src=\"{BASE}widget.html\"] >>> div.wrap > span.hidden-link", "technique": "OFFSCREEN", "note": "iframe 내부 clip"},
+    {"url": "/", "location": "iframe[src=\"{BASE}outer.html\"] >>> iframe[src=\"{BASE}inner.html\"] >>> div.box > p.x", "technique": "TRANSPARENT", "note": "중첩 iframe opacity:0"}
+  ]
+}

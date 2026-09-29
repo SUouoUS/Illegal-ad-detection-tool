@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>콘텐츠 경계 회귀 테스트</title>
+<style>
+body { font-family: sans-serif; margin: 0; background: #fff; color: #222; }
+.tab_box .target_list.screen_out { display: none; }
+.tab_box_page { display: none; } .tab_box_page.active { display: block; }
+.slider .slide { display: none; } .slider .slide.on { display: block; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+.gnb .sub { display: none; }
+</style>
+</head>
+<body>
+<!-- 재현: 활성 탭이 아닌 뉴스 목록(display:none). 서로 다른 뉴스에 배당 / 지급 / SWC2026 이 각각 있음 -->
+<div class="widget tab_box" id="news_tab">
+  <div class="target_list new"><div class="inner_box"><ul class="list tab_box_page active">
+    <li class="list_item"><a class="subject" href="/news/1">가을 신작 게임 쇼케이스 일정 공개</a><span class="num_reply">[3]</span></li>
+  </ul></div></div>
+  <div class="target_list time screen_out"><div class="inner_box">
+    <ul class="list tab_box_page">
+      <li class="list_item"><a class="subject" href="/news/11"><strong>원스토어, AI 게임 전용관 개방</strong></a><span class="num_reply">[0]</span></li>
+      <li class="list_item"><a class="subject" href="/news/12"><strong>모바일 MMORPG 사전예약 100만 돌파</strong></a><span class="num_reply">[0]</span></li>
+      <li class="list_item"><a class="subject" href="/news/13"><strong>게임사, ‘50억 원 규모 현금배당’ 사전 예고</strong></a><span class="num_reply">[0]</span></li>
+      <li class="list_item"><a class="subject" href="/news/14"><strong>‘에어 포스 컵’ 개최, 결승전 진출 8인에게 포상 휴가 지급</strong></a><span class="num_reply">[0]</span></li>
+      <li class="list_item"><a class="subject" href="/news/15"><strong>‘SWC2026’ 유럽 컵, MALIGNANT 정상 등극</strong></a><span class="num_reply">[0]</span></li>
+      <li class="list_item"><a class="subject" href="/news/16"><strong>신작 출시 기념 접속 보너스 이벤트 안내</strong></a><span class="num_reply">[2]</span></li>
+    </ul>
+  </div></div>
+</div>
+
+<!-- 정상: 대회명·제품명·모델명이 들어간 뉴스(접힌 슬라이더) -->
+<div class="slider" id="hw_news">
+  <div class="slide on"><p class="headline">이번 주 하드웨어 소식</p></div>
+  <div class="slide"><p class="headline">RTX5090 탑재 노트북 출시, 사전 구매 고객에게 사은품 지급</p></div>
+  <div class="slide"><p class="headline">LCK2026 결승 티켓 오픈, 배당률 예측 이벤트는 없어</p></div>
+  <div class="slide"><p class="headline">WIN11 24H2 업데이트 배포, 보안 패치 즉시 적용 권장</p></div>
+</div>
+
+<!-- 정상: 뉴스 한 건이 여러 span 으로 나뉨(스크린리더 전용 요약) -->
+<p class="sr-only news-sum"><span>게임사</span> <span>주주총회에서</span> <span>현금배당</span> <span>결정,</span> <span>임직원 성과 보너스 지급</span></p>
+
+<!-- 탐지 유지 1: 광고 한 문장이 여러 인라인 span 으로 나뉨(화면 밖) -->
+<p class="promo-split" style="position:absolute;left:-9999px;top:40px"><span>카</span><b>지노</b> <span>첫충 30%</span> <em>문의 텔레 @casino_kr</em></p>
+
+<!-- 탐지 유지 2: 명시적 가입코드(영문+숫자, 투명) -->
+<div class="event-note" style="color:transparent">토토 가입코드 BET2026 입력 시 첫충 20% 지급</div>
+
+<!-- 탐지 유지 3: 정상 뉴스 목록 사이에 광고 항목 하나(숨겨진 탭) -->
+<div class="widget tab_box" id="hot_tab">
+  <div class="target_list hot screen_out"><div class="inner_box"><ul class="list tab_box_page">
+    <li class="list_item"><a class="subject" href="/news/21">인디 게임 페스티벌 수상작 발표</a></li>
+    <li class="list_item"><a class="subject" href="/ad/22">바카라 무료체험 가입코드 VIP7 바로가기</a></li>
+    <li class="list_item"><a class="subject" href="/news/23">e스포츠 리그 개막전 일정 안내</a></li>
+  </ul></div></div>
+</div>
+
+<!-- 탐지 유지 4: 숨겨진 메뉴 안의 광고 -->
+<nav class="gnb"><ul class="menu"><li class="menu-item"><a href="/civil">민원</a>
+  <ul class="sub"><li><a href="/civil/apply">민원 신청</a></li><li><a class="sub-link" href="/p/9">안전놀이터 먹튀검증 텔레그램 @safe_toto</a></li></ul>
+</li></ul></nav>
+</body>
+</html>
