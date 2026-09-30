@@ -1,0 +1,188 @@
+{
+  "_comment": "이미지 OCR 기대 결과. 채점 단위는 index.html의 img 요소 1개(같은 파일이 두 요소에 쓰이면 2건). keywords: OCR 추출문에 모두 있어야 '추출 성공'(공백·대소문자 무시, 핵심 단어 포함 여부이며 글자 정확도 아님). keywords가 빈 항목은 추출 채점에서 제외. level: suspect(의심) / uncertain(불확실) / none(해당 없음) / failed(로드 실패)이 같으면 '판정 성공'. limit=true 는 알려진 한계 사례로 두 채점 모두에서 제외하고 결과만 기록. where: 이미지가 있는 위치(entry=진입 페이지, sub=하위 페이지, frame=iframe 안, nested=중첩 iframe 안). count: 같은 파일을 쓰는 img 요소 수(기본 1).",
+  "images": {
+    "img/ad_ko.png": {
+      "keywords": [
+        "카지노",
+        "가입코드"
+      ],
+      "level": "suspect",
+      "where": "entry",
+      "count": 3,
+      "note": "진입 페이지 2개 + 하위 페이지 1개(같은 이미지 재사용)"
+    },
+    "img/ad_en.png": {
+      "keywords": [
+        "CASINO",
+        "CODE"
+      ],
+      "level": "suspect",
+      "where": "entry"
+    },
+    "img/insurance.png": {
+      "keywords": [
+        "보험",
+        "할인"
+      ],
+      "level": "none",
+      "where": "entry"
+    },
+    "img/ai_service.png": {
+      "keywords": [
+        "AI",
+        "무료"
+      ],
+      "level": "none",
+      "where": "entry"
+    },
+    "img/game_news.png": {
+      "keywords": [
+        "현금배당",
+        "지급"
+      ],
+      "level": "none",
+      "where": "entry"
+    },
+    "img/prevention.png": {
+      "keywords": [
+        "도박",
+        "1336"
+      ],
+      "level": "none",
+      "where": "entry"
+    },
+    "img/small_text.png": {
+      "keywords": [
+        "카지노",
+        "가입코드"
+      ],
+      "level": "suspect",
+      "where": "entry"
+    },
+    "img/low_contrast.png": {
+      "keywords": [
+        "안전놀이터",
+        "가입코드"
+      ],
+      "level": "suspect",
+      "where": "entry"
+    },
+    "img/multiline.png": {
+      "keywords": [
+        "안전놀이터",
+        "텔레그램"
+      ],
+      "level": "suspect",
+      "where": "entry"
+    },
+    "img/separated.png": {
+      "keywords": [
+        "카지노",
+        "가입코드"
+      ],
+      "level": "uncertain",
+      "where": "entry"
+    },
+    "img/jamo.png": {
+      "keywords": [
+        "가입코드"
+      ],
+      "level": "uncertain",
+      "limit": true,
+      "note": "자모 분해는 OCR이 읽지 못할 것으로 예상",
+      "where": "entry"
+    },
+    "img/fullwidth.png": {
+      "keywords": [
+        "첫가입"
+      ],
+      "level": "uncertain",
+      "limit": true,
+      "note": "전각 영문은 OCR이 일부만 읽음",
+      "where": "entry"
+    },
+    "img/big.png": {
+      "keywords": [
+        "카지노",
+        "가입코드"
+      ],
+      "level": "suspect",
+      "where": "entry"
+    },
+    "img/missing.png": {
+      "keywords": [],
+      "level": "failed",
+      "where": "entry"
+    },
+    "img/lazy_ad.png": {
+      "keywords": [
+        "바카라",
+        "가입코드"
+      ],
+      "level": "suspect",
+      "where": "entry"
+    },
+    "img/ad_2x.png": {
+      "keywords": [
+        "토토사이트",
+        "가입코드"
+      ],
+      "level": "suspect",
+      "where": "entry"
+    },
+    "img/hidden_ad.png": {
+      "keywords": [
+        "출장안마"
+      ],
+      "level": "suspect",
+      "where": "entry"
+    },
+    "img/s_ad.png": {
+      "keywords": [
+        "홀덤",
+        "가입코드"
+      ],
+      "level": "suspect",
+      "where": "sub"
+    },
+    "img/s_normal.png": {
+      "keywords": [
+        "걷기"
+      ],
+      "level": "none",
+      "where": "sub"
+    },
+    "img/s_lazy_ad.png": {
+      "keywords": [
+        "안전놀이터",
+        "LAZY5"
+      ],
+      "level": "suspect",
+      "where": "sub",
+      "note": "지연 로딩(data-src)"
+    },
+    "img/f_ad.png": {
+      "keywords": [
+        "파워볼",
+        "가입코드"
+      ],
+      "level": "suspect",
+      "where": "frame"
+    },
+    "img/f_normal.png": {
+      "keywords": [
+        "도서관"
+      ],
+      "level": "none",
+      "where": "frame"
+    },
+    "img/n_ad.png": {
+      "keywords": [
+        "스포츠토토",
+        "가입코드"
+      ],
+      "level": "suspect",
+      "where": "nested"
+    }
+  }
+}

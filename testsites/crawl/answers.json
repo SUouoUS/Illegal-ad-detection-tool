@@ -55,6 +55,12 @@
       "location": "div.view-body > p > em.ghost",
       "technique": "TRANSPARENT",
       "note": "onclick 링크, 쿼리 순서 다름"
+    },
+    {
+      "url": "/pboard/v-9.html",
+      "location": "p.bd-text > span.late-note",
+      "technique": "TRANSPARENT",
+      "note": "경로형 목록 3쪽에서만 연결(목록 쪽 이동이 깊이를 늘리지 않아야 도달)"
     }
   ]
 }

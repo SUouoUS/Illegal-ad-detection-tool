@@ -4,6 +4,7 @@
 「공공 웹사이트 불법광고 탐지 도구 개발 공모전」(행정안전부·한국지능정보사회진흥원) 출품을 목표로 개발 중입니다.
 
 > 현재 상태: 개발 중. Windows 11 개발 환경(Python)에서만 실행을 확인했으며, Windows 실행 파일(배포 패키지)은 아직 없습니다.
+> 이 브랜치(`feature/image-ocr`)는 `main`에 이미지 속 글자 검사와 추가 의심 광고 목록을 더한 검토용 브랜치입니다.
 
 ## 주요 기능
 - **필수 탐지 4종**
@@ -17,20 +18,25 @@
 - **정확한 위치**: 요소를 하나만 가리키는 CSS 선택자를 만들고 원래 문서에서 다시 조회해 검증합니다. iframe 안은 `iframe[src="절대주소"] >>> 선택자` 형식입니다.
 - **하위 페이지 탐색**: 같은 사이트 안에서 본문 링크 우선으로 탐색합니다(기본 깊이 2, 최대 50페이지, 전체 25분). 로그아웃·삭제 같은 상태 변경 링크는 방문하지 않고, 안전한 ‘더보기’만 펼칩니다.
 - **로컬 화면**: 127.0.0.1에서만 열리는 점검 화면에서 진행 상황, 탐지 결과, 원문·복원 문구·판단 이유·발견 위치를 확인합니다.
+- **추가 의심 광고**: 광고로 의심되지만 공식 4종 기법이 없는 문구는 공식 결과와 분리해 화면과 검사 기록에 참고 항목으로 보여주고, 제외한 이유를 함께 표시합니다.
+- **수집 요약**: ‘검사 상세’에서 본문 수집 여부와 이미지·OCR 처리 건수를 확인할 수 있어, 결과 0건이 ‘검사하지 못함’인지 ‘광고 없음’인지 구분됩니다.
+- **이미지 속 글자 검사(선택, 기본 꺼짐)**: 방문한 페이지(프레임 포함)의 `<img>` 글자를 Windows 내장 OCR(Windows.Media.Ocr)로 읽어 한 문구 영역 단위로 광고성을 판단합니다(광고 의심 / 불확실). 모델을 내려받지 않으며, OCR 결과로 자모 분해·닮은꼴 기법을 판정하지 않습니다.
 - 외부 AI API 없이 CPU만 사용합니다.
 
 ## 결과 파일
 | 파일 | 위치 | 내용 |
 |---|---|---|
 | `result.json` | 프로그램 폴더(개발 환경에서는 저장소 최상위) | 공식 스키마의 적격평가용 결과. 탐지 0건·중단·로딩 실패여도 항상 생성(UTF-8, BOM 없음) |
-| `runs/<검사시각>/scan.json` | 저장소 최상위 `runs/` | 화면용 상세 기록(페이지별 상태, 판단 근거 등) |
+| `result_extra.json` | `result.json`과 같은 폴더 | 추가 탐지(이미지 속 글자 ‘광고 의심’). `technique: "ETC"`, `extra_finding` 사용. 이미지 검사를 켜고 OCR이 실행된 경우에만 생성 |
+| `runs/<검사시각>/scan.json` | 저장소 최상위 `runs/` | 화면용 상세 기록(페이지별 상태, 판단 근거, 추가 의심 광고, 이미지 처리 결과, 수집 요약) |
 
 ## 설치 (Windows 11, 개발 환경)
 ```powershell
 python -m venv .venv
-.venv\Scripts\pip install playwright fastapi uvicorn pytest
+.venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python -m playwright install chromium
 ```
+이미지 속 글자 검사에는 Windows 한국어 OCR 구성 요소가 필요합니다(한국어 Windows는 기본 포함). 없으면 화면에 설치 방법이 표시됩니다. 자세한 사용법은 [사용설명서](docs/MANUAL.md)를 참고하세요.
 
 ## 실행
 ```powershell
@@ -38,7 +44,7 @@ python -m venv .venv
 .venv\Scripts\python -m clearweb
 
 # 화면 없이 검사
-.venv\Scripts\python -m clearweb scan https://www.example.go.kr/ [--max-depth 2] [--max-pages 50] [--budget 1500] [--no-follow]
+.venv\Scripts\python -m clearweb scan https://www.example.go.kr/ [--max-depth 2] [--max-pages 50] [--budget 1500] [--no-follow] [--ocr]
 ```
 
 ## 테스트
@@ -54,7 +60,12 @@ python -m venv .venv
 .venv\Scripts\python -m clearweb scan http://127.0.0.1:8811/
 .venv\Scripts\python tools\score.py --answers testsites\dev\answers.json --result result.json --base http://127.0.0.1:8811/
 
-# 3) 단위 테스트
+# 3) 이미지 속 글자(OCR) 테스트: 합성 이미지, 추출·판정을 따로 채점 (단위: img 요소 1개). 단계별 누락 진단은 tools\ocr_stages.py
+.venv\Scripts\python -m testsites.server --site ocr --port 8841
+.venv\Scripts\python -m clearweb scan http://127.0.0.1:8841/ --no-follow --ocr
+.venv\Scripts\python tools\score_ocr.py
+
+# 4) 단위 테스트
 .venv\Scripts\python -m pytest -q tests
 ```
 테스트 사이트는 개발자가 직접 만든 것이라, 이 점수는 일반화 성능의 근거가 아닙니다.
@@ -68,23 +79,27 @@ clearweb/          탐지 도구 본체
   detect.py          광고성 판단과 기법 판정
   crawl.py           탐색 범위·우선순위·제외 규칙
   scanner.py         브라우저 제어, 페이지·프레임 순회, 결과 저장
-  result_writer.py   result.json 생성과 스키마 검사
+  result_writer.py   result.json·result_extra.json 생성과 스키마 검사
+  ocr.py             이미지 준비·Windows OCR 호출·문구 영역 구분
   server.py, web/    로컬 화면
   rules/ad_rules.json  광고성 판단 규칙
 testsites/         정답이 있는 로컬 테스트 사이트
 tools/score.py     공식 규칙 기반 채점 도구
+tools/score_ocr.py OCR 추출·판정 채점 도구
 tests/             단위 테스트
-docs/              진행 상황(PROGRESS.md), 규격 메모와 가정(SPEC_NOTES.md)
+docs/              사용설명서(MANUAL.md), 진행 상황(PROGRESS.md), 규격 메모와 가정(SPEC_NOTES.md)
 ```
 
 ## 브랜치
 - `main`: 필수 4종 탐지, 하위 페이지 탐색, 로컬 화면, 테스트 사이트
-- `feature/image-ocr`: 진입 페이지 이미지 속 글자 검사(선택 기능, Windows 내장 OCR), 추가 의심 광고 목록, 사용설명서. 검토 중이며 아직 `main`에 합치지 않았습니다.
+- `feature/image-ocr` (현재 브랜치): `main` + 방문한 페이지의 이미지 속 글자 검사(선택 기능, Windows 내장 OCR), 추가 의심 광고 목록, 수집 요약, 사용설명서. 검토 중이며 아직 `main`에 합치지 않았습니다.
 
 ## 알려진 한계
 - 공식 4종 기법 없이 그대로 보이는 광고 문구는 `result.json`에 넣지 않습니다(공식 규격 기준).
 - 스크립트 함수로만 이동하는 게시판 링크는 찾지 못할 수 있습니다.
-- 보안 확인(봇 차단) 화면을 띄우는 사이트는 검사할 수 없으며, 우회하지 않습니다.
+- 보안 확인(봇 차단) 화면을 띄우는 사이트는 검사할 수 없으며, 우회하지 않습니다(명확한 근거가 있을 때 ‘보안 확인 차단’으로 표시).
+- 이미지 검사는 방문한 페이지와 그 안의 프레임에 있는 `<img>`의 글자만 읽습니다. CSS 배경 이미지, canvas, 동영상, 광고 네트워크 광고는 검사하지 않고, 그림 자체의 의미는 판단하지 않습니다. 자모 분해·전각 문자 이미지는 안정적인 인식을 보장하지 못합니다.
+- OCR은 Windows 전용이며, 한국어 OCR 구성 요소가 없는 PC와 배포 실행 파일에서는 아직 확인하지 않았습니다.
 - 공식 규격에서 확정되지 않은 부분의 가정은 `docs/SPEC_NOTES.md`에 정리했습니다.
 
 ## 라이선스

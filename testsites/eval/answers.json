@@ -1,0 +1,31 @@
+{
+  "_comment": "평가용 정답(도립 한빛박물관, 가상). 탐지기 실행 전에 고정함. 위치 규칙: 숨긴 광고 문구를 담은 요소. 숨김 스타일이 문구만 담은 감싸는 요소에 있으면 안쪽 문구 요소(p)를 정답으로 봄. 공통 레이아웃 반복은 피하기 위해 바닥글 광고는 진입 페이지에만 둠. /member/logout.html 은 방문하면 안 되는 함정 페이지(정답 아님).",
+  "entry": "/",
+  "answers": [
+    {"url": "/", "location": "footer.site-footer > p.site-footer__band", "technique": "TRANSPARENT", "note": "바닥글 배경(#1f2a36)과 같은 글자색"},
+    {"url": "/", "location": "footer.site-footer > p.site-footer__extra", "technique": "OFFSCREEN", "note": "요소 자신에 display:none"},
+    {"url": "/", "location": "div.card-grid > article:nth-of-type(2) > p.card__desc--cut", "technique": "OFFSCREEN", "note": "text-indent:-9999px"},
+    {"url": "/exhibitions.html", "location": "dl.exhibit-list > dd.exhibit-list__desc--sponsor", "technique": "HOMOGLYPH", "note": "전각 영문 Ｃａｓｉｎｏ (보이는 글자)"},
+    {"url": "/exhibitions.html", "location": "dl.exhibit-list > dd:nth-of-type(3) > span.exhibit-list__tag", "technique": "JAMO", "note": "복합: 자모 분해 + 1px 글자"},
+    {"url": "/exhibitions.html", "location": "dl.exhibit-list > dd:nth-of-type(3) > span.exhibit-list__tag", "technique": "OFFSCREEN", "note": "복합: 자모 분해 + 1px 글자"},
+    {"url": "/exhibitions.html", "location": "figure.exhibit-figure > figcaption.exhibit-figure__cap", "technique": "JAMO", "note": "보이는 자모 분해(먹튀검증)"},
+    {"url": "/notice/list-1.html", "location": "table.notice-table > tbody > tr:nth-of-type(4) > td.notice-table__subject > span", "technique": "TRANSPARENT", "note": "인라인 opacity:0"},
+    {"url": "/notice/list-2.html", "location": "table.notice-table > tbody > tr:nth-of-type(4) > td.notice-table__subject > span.clip-hide", "technique": "OFFSCREEN", "note": "clip rect(0 0 0 0), 목록 2쪽"},
+    {"url": "/notice/list-3.html", "location": "table.notice-table > tbody > tr:nth-of-type(2) > td.notice-table__subject", "technique": "HOMOGLYPH", "note": "키릴 문자 тото, 목록 3쪽"},
+    {"url": "/notice/n-201.html", "location": "p.post-view__extra > span.is-muted", "technique": "TRANSPARENT", "note": "클래스 opacity:0, 불법대출"},
+    {"url": "/notice/n-201.html", "location": "section.comments > div.cmt:nth-of-type(2) > p.cmt__text", "technique": "JAMO", "note": "댓글 자모 분해"},
+    {"url": "/notice/n-202.html", "location": "div.post-view__legacy > p", "technique": "OFFSCREEN", "note": "감싸는 div에 display:none, 문구를 담은 p를 정답으로 봄"},
+    {"url": "/notice/n-203.html", "location": "p.post-view__note > em", "technique": "HOMOGLYPH", "note": "복합: 전각 ｂｅｔ + color:transparent"},
+    {"url": "/notice/n-203.html", "location": "p.post-view__note > em", "technique": "TRANSPARENT", "note": "복합: 전각 ｂｅｔ + color:transparent"},
+    {"url": "/notice/n-203.html", "location": "section.comments > div.cmt > p.cmt__text", "technique": "HOMOGLYPH", "note": "숫자 대체 c4sin0 (보이는 댓글)"},
+    {"url": "/notice/n-204.html", "location": "div.post-view__body > p.post-view__promo", "technique": "OFFSCREEN", "note": "position:absolute; top:-3000px"},
+    {"url": "/notice/n-206.html", "location": "div.hint-box > p.hint-box__same", "technique": "TRANSPARENT", "note": "배경(#eef4ea)과 같은 글자색, 불법대출"},
+    {"url": "/notice/n-207.html", "location": "div.post-view__body > p.post-view__memo", "technique": "OFFSCREEN", "note": "인라인 text-indent:-9999px"},
+    {"url": "/about.html", "location": "p.about__contact > span", "technique": "TRANSPARENT", "note": "color:rgba(0,0,0,0)"},
+    {"url": "/programs.html", "location": "p.program__greek > span.zero", "technique": "HOMOGLYPH", "note": "복합: 그리스 문자 ΒΕΤ + font-size:0"},
+    {"url": "/programs.html", "location": "p.program__greek > span.zero", "technique": "OFFSCREEN", "note": "복합: 그리스 문자 ΒΕΤ + font-size:0"},
+    {"url": "/programs.html", "location": "iframe[src=\"{BASE}widgets/banner.html\"] >>> p.w-banner__ghost", "technique": "OFFSCREEN", "note": "iframe 안 left:-9999px"},
+    {"url": "/programs.html", "location": "iframe[src=\"{BASE}widgets/banner.html\"] >>> iframe[src=\"{BASE}widgets/inner.html\"] >>> p.w-inner__fade", "technique": "JAMO", "note": "중첩 iframe, 복합: 자모 분해 + opacity:0"},
+    {"url": "/programs.html", "location": "iframe[src=\"{BASE}widgets/banner.html\"] >>> iframe[src=\"{BASE}widgets/inner.html\"] >>> p.w-inner__fade", "technique": "TRANSPARENT", "note": "중첩 iframe, 복합: 자모 분해 + opacity:0"}
+  ]
+}

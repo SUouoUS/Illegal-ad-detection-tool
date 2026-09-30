@@ -116,7 +116,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = """<h2>행복구청 누리집</h2><p>구민 여러분을 환영합니다.</p>
 <p class="sr">불법 도박 예방 캠페인: 도박 문제 상담 1336</p>
 <ul class="quick"><li><a href="/notice">공지사항</a></li><li><a href="/board/list?page=1">자유게시판</a></li>
-<li><a href="mailto:help@example.go.kr">메일 문의</a></li><li><a href="javascript:void(0)">새로고침</a></li></ul>"""
+<li><a href="mailto:help@example.go.kr">메일 문의</a></li><li><a href="/pboard/list-1.html">경로형 게시판</a></li><li><a href="javascript:void(0)">새로고침</a></li></ul>"""
             return self._send(200, page("행복구청", body))
         if path == "/notice":
             return self._send(200, page("공지사항", '<h2>공지사항</h2><div class="notice-body"><p>추석 연휴 민원실 운영 안내</p>'
@@ -158,6 +158,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200, page("로그아웃", '<p>로그아웃되었습니다.</p><span style="opacity:0">카지노 가입코드 TRAP1 즉시 지급</span>'))
         if path in ("/board/delete", "/board/write"):
             return self._send(200, page("처리", "<p>처리되었습니다.</p>"))
+        # path-style paged board: list-N.html pages linked from a paging control; v-9 is linked only from page 3
+        if path.startswith("/pboard/list-") and path.endswith(".html"):
+            n = int(path[len("/pboard/list-"):-5] or 0)
+            items = {1: [1, 2, 3], 2: [4, 5, 6], 3: [7, 8, 9]}.get(n)
+            if not items:
+                return self._send(404, page("없음", "<p>없음</p>"))
+            rows = "".join(f'<li class="bd-item"><a href="v-{i}.html">안내 글 {i}</a></li>' for i in items)
+            paging = " ".join(f'<a href="list-{k}.html">{k}</a>' for k in (1, 2, 3))
+            archive = " ".join(f'<a href="y{y}.html">{y}</a>' for y in (2023, 2024, 2025))
+            return self._send(200, page("경로형 게시판", f'<ul class="bd-list">{rows}</ul><div class="paging">{paging}</div>'
+                                                         f'<p class="archive">연도별 보관: {archive}</p>'))
+        if path.startswith("/pboard/v-") and path.endswith(".html"):
+            i = int(path[len("/pboard/v-"):-5] or 0)
+            extra = '<span class="late-note" style="opacity:0">슬롯 무료 체험 바로가기 play-now.live</span>' if i == 9 else ""
+            return self._send(200, page(f"안내 글 {i}", f'<article class="bd-view"><p class="bd-text">안내 글 {i} 본문입니다.{extra}</p></article>'))
+        if path.startswith("/pboard/y") and path.endswith(".html"):
+            return self._send(200, page("보관", "<p>연도별 보관 목록</p>"))
+        # four cases for telling "0 findings" apart (fake data only)
+        promo = "토토사이트 가입코드 TEST77 첫충 20% 지급 문의 텔레 @test_demo"
+        if path == "/case/visible":
+            return self._send(200, page("홍보", f'<div class="post"><p class="promo">{promo}</p></div>'))
+        if path == "/case/hidden":
+            return self._send(200, page("홍보", f'<div class="post"><p>행사 안내</p><p class="promo" style="display:none">{promo}</p></div>'))
+        if path == "/case/news":
+            return self._send(200, page("뉴스", '<article class="news"><h3>경찰, 불법 도박 사이트 운영 조직 검거…텔레그램으로 회원 모집</h3>'
+                                                 '<p>게임사, 50억 원 규모 현금배당 결정</p>'
+                                                 '<p class="prevent">불법 도박은 범죄입니다. 도박 문제는 1336에서 상담하세요.</p></article>'))
+        if path == "/case/denied":                     # plain refusal: short 403 without any security-check page
+            return self._send(403, "<!doctype html><html><head><meta charset='utf-8'><title>403 Forbidden</title></head><body><h1>Forbidden</h1></body></html>")
+        if path == "/challenge":                       # imitation of a bot-protection page (local, no real vendor)
+            return self._send(403, "<!doctype html><html><head><meta charset='utf-8'><title>Just a moment...</title></head>"
+                                   "<body><p>Checking your browser before accessing the site.</p>"
+                                   "<iframe src='/cdn-cgi/challenge-platform/h/b/turnstile/test'></iframe></body></html>")
+        if path.startswith("/cdn-cgi/challenge-platform/"):
+            return self._send(200, "<!doctype html><html><body>verify</body></html>")
         if path == "/__hits":
             return self._send(200, json.dumps(HITS, ensure_ascii=False), "application/json")
         return self._send(404, page("없음", "<p>페이지가 없습니다.</p>"))

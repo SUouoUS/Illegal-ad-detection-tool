@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import threading
 import time
 import webbrowser
@@ -17,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import VERSION
 from .paths import resource_dir, result_dir, runs_dir
+from . import ocr
 from .scanner import Scan, ScanConfig
 
 mimetypes.add_type("font/woff2", ".woff2")
@@ -84,13 +86,27 @@ def _config(body: dict) -> ScanConfig:
         cfg.max_pages = v
     if (v := num("budget_min", 1, 29, float)) is not None:
         cfg.total_budget_s = v * 60
+    cfg.ocr_enabled = bool(opts.get("ocr"))
     return cfg
 
 
 @app.get("/api/defaults")
 def defaults():
     c = ScanConfig()
-    return {"max_depth": c.max_depth, "max_pages": c.max_pages, "budget_min": round(c.total_budget_s / 60, 1)}
+    ok, msg = ocr.engine_status()
+    return {"max_depth": c.max_depth, "max_pages": c.max_pages, "budget_min": round(c.total_budget_s / 60, 1),
+            "ocr": c.ocr_enabled, "ocr_available": ok, "ocr_message": msg}
+
+
+@app.get("/api/scans/{run_id}/images/{name}")
+def run_image(run_id: str, name: str):
+    """Preview saved at scan time. The original image URL is never requested again."""
+    if not run_id.replace("-", "").isdigit() or not re.fullmatch(r"[0-9a-f]{40}\.jpg", name):
+        raise HTTPException(404)
+    f = runs_dir() / run_id / "images" / name
+    if not f.is_file():
+        raise HTTPException(404)
+    return FileResponse(f, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
 
 
 def _run(sc: Scan):
@@ -147,7 +163,18 @@ def get_run(run_id: str):
     return JSONResponse(json.loads(f.read_text(encoding="utf-8")))
 
 
+def _free_port(start: int, tries: int = 20) -> int:
+    """First port from `start` that nothing on 127.0.0.1 is listening on."""
+    import socket
+    for port in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    raise SystemExit(f"사용할 수 있는 포트가 없습니다({start}~{start + tries - 1}).")
+
+
 def serve(port: int = 8765, open_browser: bool = True):
+    port = _free_port(port)
     url = f"http://127.0.0.1:{port}/"
     print(f"ClearWeb {VERSION} - 화면 주소: {url}")
     print(f"결과 파일 위치: {Path(result_dir()) / 'result.json'}")

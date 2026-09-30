@@ -229,8 +229,13 @@ class Candidate:
     changes: list[dict] = field(default_factory=list)
 
 
-def analyze_frame(nodes: list[dict], report_excluded: bool = True) -> tuple[list[Candidate], list[dict]]:
-    """Find ad units and their techniques in one frame's records."""
+def analyze_frame(nodes: list[dict], report_excluded: bool = True,
+                  visible: list | None = None) -> tuple[list[Candidate], list[dict]]:
+    """Find ad units and their techniques in one frame's records.
+
+    `visible`, when given, collects ad units that met the ad rules but show none of the
+    four official techniques (plain visible text). They never become official findings;
+    the screen lists them as additional suspects with the reason they were left out."""
     by_i = {n["i"]: n for n in nodes}
     children: dict[int, list[int]] = {}
     for n in nodes:
@@ -375,6 +380,10 @@ def analyze_frame(nodes: list[dict], report_excluded: bool = True) -> tuple[list
         if not reported_hidden:
             for t, why in obf.items():
                 cands.append(_cand(u, t, by_i, rs, v, why, u))
+            if not obf and visible is not None:
+                visible.append({"index": u, "evidence": _collapse(n["text"])[:500], "restored": _collapse(rs.text)[:500],
+                                "ad_reasons": list(v.reasons),
+                                "excluded_why": "숨김·위장(공식 4종 기법)이 확인되지 않아 공식 결과(result.json)에서 제외"})
 
     # 3) group units under one hidden root that holds nothing but ad text
     cands = _merge_pure_roots(cands, by_i, info, ancestors)
@@ -447,3 +456,61 @@ def _merge_pure_roots(cands, by_i, info, ancestors):
             c.index = replace[c.index]
             c.evidence = _collapse(by_i[c.index]["text"])[:500]
     return cands
+
+
+# ------------------------------------------------------------------ text in images (OCR)
+def judge_image(blocks: list[dict]) -> dict:
+    """Ad judgement for OCR text of ONE image.
+
+    * each text block (caption / banner line group) is judged on its own with the same
+      rules as page text; words from different blocks or different images are not combined
+    * 'suspect' only when one block meets the rules on its own
+    * 'uncertain' when evidence exists but is not enough: the rules are met only if
+      separate blocks are joined, or a block has a topic word without anything else
+    * OCR can misread or normalise characters, so jamo / look-alike shapes in OCR output
+      never become JAMO / HOMOGLYPH findings; they are only mentioned as a note
+    """
+    out = {"level": "none", "block": None, "reasons": [], "excluded_by": [], "note": "", "blocks": []}
+    texts = [b["text"] for b in blocks if len(_squash(b["text"])) >= 2]
+    if not texts:
+        out["note"] = "인식된 글자가 없음"
+        return out
+    best = None
+    weak_hint = None
+    shapes = False
+    for k, b in enumerate(blocks):
+        t = b["text"]
+        if len(_squash(t)) < 2:
+            continue
+        rs = restore(t)
+        shapes = shapes or bool(rs.changes)
+        v = adjudge(t, rs.text, concealed=False, obfuscated=False)
+        out["blocks"].append({"index": k, "is_ad": v.is_ad, "excluded_by": v.excluded_by,
+                              "strong": sorted(v.strong), "weak": sorted(v.weak)})
+        if v.is_ad and best is None:
+            best = (k, v)
+        if v.excluded_by:
+            out["excluded_by"] = sorted(set(out["excluded_by"]) | set(v.excluded_by))
+        if not v.is_ad and not v.excluded_by and v.strong and weak_hint is None:
+            weak_hint = (k, v)
+    if best:
+        k, v = best
+        out.update(level="suspect", block=k, reasons=list(v.reasons))
+    else:
+        joined = " ".join(texts)
+        jv = adjudge(joined, restore(joined).text)
+        if jv.is_ad and len(texts) > 1:
+            out.update(level="uncertain", reasons=list(jv.reasons),
+                       note="서로 떨어진 문구를 합쳤을 때만 기준을 충족함 — 한 문구 안의 근거는 부족")
+        elif weak_hint:
+            k, v = weak_hint
+            labels = {c: d["label"] for c, d in rules().categories.items()}
+            out.update(level="uncertain", block=k,
+                       reasons=["주제어: " + ", ".join(sorted(_lbl(x, labels) for x in v.strong))],
+                       note="주제어만 있고 유도 표현·연락 수단이 없음")
+        elif out["excluded_by"]:
+            out["note"] = "예방·보도·안내 문맥으로 판단: " + ", ".join(out["excluded_by"][:5])
+    if shapes:
+        out["note"] = (out["note"] + " · " if out["note"] else "") + \
+            "자모·닮은꼴 형태가 보이지만 OCR 오인식일 수 있어 은닉 기법으로 판단하지 않음"
+    return out

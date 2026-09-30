@@ -81,3 +81,26 @@ def test_hidden_piece_inside_visible_sentence_stays_the_unit():
              node(1, 0, "span", "먹튀검증 안전놀이터 상담 텔레그램 @promo_777", "promo-note", inline=True, signals=own)]
     cands, _ = analyze_frame(nodes)
     assert [(c.index, c.technique) for c in cands] == [(1, "TRANSPARENT")]
+
+
+def test_visible_ads_are_collected_but_never_official():
+    text = "토토사이트 가입코드 TEST77 첫충 20% 지급 문의 텔레 @test_demo"
+    visible = []
+    cands, _ = analyze_frame([node(0, -1, "p", text, "promo")], True, visible)
+    assert cands == [] and [v["index"] for v in visible] == [0]
+    assert "공식 결과" in visible[0]["excluded_why"]
+
+
+def test_hidden_ads_are_official_not_visible_extra():
+    text = "토토사이트 가입코드 TEST77 첫충 20% 지급 문의 텔레 @test_demo"
+    visible = []
+    cands, _ = analyze_frame([node(0, -1, "p", text, "promo", signals=HID)], True, visible)
+    assert [(c.index, c.technique) for c in cands] == [(0, "OFFSCREEN")] and visible == []
+
+
+def test_news_and_prevention_are_neither():
+    visible = []
+    for t in ["경찰, 불법 도박 사이트 운영 조직 검거…텔레그램으로 회원 모집", "불법 도박은 범죄입니다. 도박 문제는 1336에서 상담하세요."]:
+        cands, _ = analyze_frame([node(0, -1, "p", t)], True, visible)
+        assert cands == []
+    assert visible == []

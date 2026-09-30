@@ -1,0 +1,15 @@
+# ClearWeb runtime
+playwright>=1.49
+fastapi>=0.110
+uvicorn>=0.29
+# optional: text in images (Windows OCR through pywinrt; used only when the option is on)
+pillow>=10
+winrt-runtime>=3.0; sys_platform == "win32"
+winrt-Windows.Media.Ocr>=3.0; sys_platform == "win32"
+winrt-Windows.Graphics.Imaging>=3.0; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=3.0; sys_platform == "win32"
+winrt-Windows.Foundation>=3.0; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=3.0; sys_platform == "win32"
+winrt-Windows.Globalization>=3.0; sys_platform == "win32"
+# development / tests
+pytest>=8
