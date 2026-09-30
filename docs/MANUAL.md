@@ -10,17 +10,21 @@
 환경 변수 `CLEARWEB_RESULT_DIR`로 결과 폴더를 바꿀 수 있습니다.
 ※ 이미지 검사를 끈 채 검사하면 `result_extra.json`은 새로 쓰지 않습니다. 같은 폴더에 이전 파일이 있으면 그대로 남으므로 제출 전에 확인하세요.
 
-## 설치 (개발 환경, Windows 11)
+## 실행 (배포본, Windows 11)
+1. 받은 zip을 원하는 폴더에 풉니다. Python이나 다른 프로그램을 따로 설치할 필요가 없습니다.
+2. `ClearWeb\ClearWeb.exe`를 더블클릭합니다. 검은 콘솔 창에 화면 주소가 표시되고, 기본 브라우저에 점검 화면(`http://127.0.0.1:8765/`, 사용 중이면 다음 번호)이 열립니다.
+3. 콘솔 창을 닫으면 프로그램이 종료됩니다.
+- 화면 없이 실행: `ClearWeb.exe scan <주소> [--max-depth 2] [--max-pages 50] [--budget 1500] [--no-follow] [--ocr]`
+- 결과 파일은 `ClearWeb.exe`가 있는 폴더에 생깁니다(위 표).
+
+## 실행 (개발 환경)
 ```
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python -m playwright install chromium
+.venv\Scripts\python -m clearweb
 ```
-Windows 실행 파일(배포 패키지)은 아직 준비 중입니다.
-
-## 실행
-- 화면: `.venv\Scripts\python -m clearweb` → 브라우저가 `http://127.0.0.1:8765/`로 열립니다.
-- 화면 없이: `.venv\Scripts\python -m clearweb scan <주소> [--max-depth 2] [--max-pages 50] [--budget 1500] [--no-follow] [--ocr]`
+배포본을 만드는 방법은 `docs/BUILD.md`를 참고하세요.
 
 ## 화면 사용 순서
 1. '점검할 웹 주소'에 주소를 넣고 '검사 시작'. 필요하면 '검사 설정'에서 깊이·최대 페이지 수·시간 한도·이미지 속 글자 검사를 바꿉니다.

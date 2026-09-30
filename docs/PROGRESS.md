@@ -10,7 +10,7 @@ python -m venv .venv && .venv\Scripts\pip install playwright fastapi uvicorn pyt
 .venv\Scripts\python tools\score.py --answers testsites\dev\answers.json --result result.json --base http://127.0.0.1:8811/
 .venv\Scripts\python -m pytest -q tests
 ```
-※ 이것은 개발용 실행이며 Windows 배포 패키지(3차)는 아직 없음.
+※ 위는 개발용 실행. Windows 배포본은 docs/BUILD.md 참고.
 
 ## 1차 (완료, 2026-09-28)
 - 진입 페이지 1개 + 중첩 iframe 수집, 필수 4종, 광고성 판단/예방 문맥 제외, 선택자 생성·재검증, result.json, dev 사이트+채점기, 기본 화면.
@@ -153,6 +153,11 @@ python -m venv .venv && .venv\Scripts\pip install playwright fastapi uvicorn pyt
 - 회귀: dev 16/16·크롤링 10/10·fp 4/4·eval 회귀 24/25, result.json은 이번 작업 전과 동일(OCR 켜도 동일). OCR 진입 페이지 기준 14/15·16/16, eval_ocr 회귀 11/12·12/13(새 평가 성능 아님). pytest 74개.
 - OCR 오독 원인 확인: 'AI' 누락과 '파워볼→파워불'은 시도한 전처리(회색 변환·명암 보정·확대 1~3배)에서 모두 발생 → 현재 OCR 엔진과 시도한 전처리에서는 해결되지 않음(원인을 확정한 것은 아님). 특정 문구에 맞춘 조정은 하지 않음.
 - 남은 한계: CSS 배경·canvas·영상·picture source·광고 네트워크 광고 미지원, 방문하지 않은 페이지의 이미지는 검사하지 않음, 자모 분해·전각 영문 이미지는 안정적인 인식을 보장하지 못함(전각 영문은 읽은 사례와 못 읽은 사례가 모두 있음), OCR 오독 대응 없음. 실제 사이트에서는 이번에 확인하지 않음.
+
+## Windows 배포본 (2026-09-30) — 자세한 내용 docs/BUILD.md
+- PyInstaller onedir: `packaging/build.ps1` → `dist/ClearWeb/`(약 420MB), `dist/ClearWeb-0.1.0-win64.zip`(약 176MB). Chromium(headless shell)·화면·규칙 파일·Windows OCR 연결 모듈 포함.
+- 커밋 094f743 빌드를 개발 폴더 밖(%TEMP%)에 풀어 Python 경로를 뺀 환경에서 확인: 실행 → 텍스트 검사 → OCR 검사(하위 페이지·iframe 포함) → OCR 끈 재검사(이전 result_extra.json 제거) → 중단 → `ClearWeb.exe scan`. 결과 파일은 실행 파일 폴더에 생성.
+- 미검증: Python 없는 별도 Windows PC, 한국어 OCR 구성 요소가 없는 Windows, 실제 탐색기 더블클릭과 보안 경고.
 
 ## 남은 문제 / 다음 단계
 - 탐지기와 테스트 사이트를 같은 사람이 만듦 → 일반화 근거 아님. 문구·구조가 다른 eval 사이트 필요.
