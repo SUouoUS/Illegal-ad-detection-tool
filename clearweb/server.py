@@ -163,7 +163,18 @@ def get_run(run_id: str):
     return JSONResponse(json.loads(f.read_text(encoding="utf-8")))
 
 
+def _free_port(start: int, tries: int = 20) -> int:
+    """First port from `start` that nothing on 127.0.0.1 is listening on."""
+    import socket
+    for port in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    raise SystemExit(f"사용할 수 있는 포트가 없습니다({start}~{start + tries - 1}).")
+
+
 def serve(port: int = 8765, open_browser: bool = True):
+    port = _free_port(port)
     url = f"http://127.0.0.1:{port}/"
     print(f"ClearWeb {VERSION} - 화면 주소: {url}")
     print(f"결과 파일 위치: {Path(result_dir()) / 'result.json'}")

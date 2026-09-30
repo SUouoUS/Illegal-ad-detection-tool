@@ -34,3 +34,18 @@ def test_state_is_final_only_after_results_are_saved(tmp_path, monkeypatch):
     assert all(path and record for _, path, record in final)
     assert sc.progress.state == "done"
     assert sc.progress.elapsed_sec == sc.record["result"]["meta"]["elapsed_sec"]
+
+
+def test_stale_result_extra_is_removed_when_ocr_did_not_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(scanner, "runs_dir", lambda: tmp_path / "runs")
+
+    async def no_browser(self, pages, findings, excluded):
+        pages.append({"status": "ok", "url": "http://x/", "error": "", "frames": []})
+
+    monkeypatch.setattr(scanner.Scan, "_run", no_browser)
+    (tmp_path / "result_extra.json").write_text('{"meta": {}, "findings": [{"id": "x_001"}]}', encoding="utf-8")
+    sc = scanner.Scan("http://x/", out_dir=tmp_path)           # OCR off (default)
+    sc.run()
+    assert not (tmp_path / "result_extra.json").exists()
+    assert sc.record["ocr"]["removed_stale_extra"].endswith("result_extra.json")
+    assert (tmp_path / "result.json").exists()

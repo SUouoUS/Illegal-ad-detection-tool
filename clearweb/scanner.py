@@ -283,9 +283,14 @@ class Scan:
             doc = result_writer.build(self.entry_url, started, finished, findings, elapsed)
             path = result_writer.write(doc, self.out_dir / "result.json")
             extra_path = None
+            extra_file = self.out_dir / "result_extra.json"
             if self.ocr_record.get("ran"):
                 extra = result_writer.build_extra(self.entry_url, started, finished, self._extra_findings(), elapsed)
-                extra_path = result_writer.write_extra(extra, self.out_dir / "result_extra.json")
+                extra_path = result_writer.write_extra(extra, extra_file)
+            elif extra_file.exists():
+                # a result_extra.json left by an earlier scan must not look like this scan's result
+                extra_file.unlink()
+                self.ocr_record["removed_stale_extra"] = str(extra_file)
             self.record = {
                 "tool_version": VERSION, "run_id": self.run_id, "entry_url": self.entry_url,
                 "state": state, "end_reason": reason,
