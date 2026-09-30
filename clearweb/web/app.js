@@ -651,7 +651,7 @@
 
   // ------------------------------------------------------------ scan settings
   const optsSummary = () => {
-    $("opts-summary").textContent = `(깊이 ${$("opt-depth").value} · 최대 ${$("opt-pages").value}페이지 · ${$("opt-budget").value}분` +
+    $("opts-summary").textContent = `(링크 ${$("opt-depth").value}번 · 최대 ${$("opt-pages").value}페이지 · ${$("opt-budget").value}분` +
       ($("opt-ocr").checked ? " · 이미지 글자 검사)" : ")");
   };
   fetch("/api/defaults").then((r) => r.json()).then((d) => {
