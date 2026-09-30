@@ -248,7 +248,9 @@
       : `본문을 수집하지 못함 (검사하지 못한 페이지 ${miss}개)`;
     const im = c.images;
     $("sd-img").textContent = !im.enabled ? "꺼짐" : !im.ran ? `실행하지 못함 · ${im.error}`
-      : `이미지 ${im.found}개 · OCR 성공 ${im.ok} · 실패 ${im.failed} · 한도·건너뜀 ${im.skipped + im.timeout}` + (im.stopped ? ` · 중단 ${im.stopped}` : "");
+      : `이미지 ${im.found}개(페이지 ${(rec.ocr.coverage || {}).pages_collected ?? "-"}곳에서 수집) · OCR 성공 ${im.ok} · 실패 ${im.failed} · 한도·건너뜀 ${im.skipped + im.timeout}` +
+        (im.stopped ? ` · 중단 ${im.stopped}` : "") +
+        ((rec.ocr.coverage || {}).pages_not_collected ? ` · 이미지를 수집하지 못한 페이지 ${rec.ocr.coverage.pages_not_collected}개` : "");
   }
 
   function renderSkipped(rec) {
@@ -366,7 +368,8 @@
         const blk = im.verdict && im.verdict.block != null ? im.ocr_blocks[im.verdict.block].text : (im.ocr_text || "").replace(/\n/g, " ");
         li.append(el("span", "r-text", blk));
         li.append(el("span", "r-types lv-" + im.level, `이미지 · ${LEVEL[im.level]}`));
-        li.append(el("span", "r-path", im.selector));
+        const multi = new Set(imgs.map((x) => x.page_url)).size > 1;
+        li.append(el("span", "r-path", (multi ? pathLabel(im.page_url, true) + " · " : "") + (im.location || im.selector)));
         li.addEventListener("click", () => selectImage(row.i, r));
       }
       li.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); li.click(); } });
@@ -383,7 +386,8 @@
       const tr = el("tr");
       const res = im.status === "ok" ? (LEVEL[im.level] || "처리됨") : STATUS[im.status] || im.status;
       tr.append(el("td", im.status === "ok" ? (im.level === "none" ? "s-ok" : "s-warn") : "s-bad", res));
-      tr.append(el("td", "", im.img_url || "(주소 없음)"));
+      const where = pathLabel(im.page_url, true) + (im.frame_chain && im.frame_chain.length ? ` (삽입 프레임 ${im.frame_chain.length}단계 안)` : "");
+      tr.append(el("td", "", `${im.img_url || "(주소 없음)"} — ${where}`));
       const notes = [im.reason, im.cache_hit ? "같은 이미지 결과 재사용" : "", im.prep_note, im.verdict && im.verdict.note].filter(Boolean);
       tr.append(el("td", "", notes.join(" · ")));
       tb.append(tr);
@@ -477,14 +481,16 @@
     a.textContent = im.page_url;
     a.href = /^https?:/i.test(im.page_url) ? im.page_url : "#";
     $("i-src").textContent = im.img_url;
-    $("i-loc").textContent = im.selector;
+    $("i-loc").textContent = im.location || im.selector;
     const proc = [
       ["처리 결과", `${STATUS[im.status] || im.status}${im.reason ? ` · ${im.reason}` : ""}`],
       ["원본 크기", im.natural ? `${im.natural[0]}×${im.natural[1]}px${im.bytes ? ` · ${Math.round(im.bytes / 1024)}KB` : ""}` : "-"],
       ["OCR 전처리", im.prep_note || "크기 조정 없음 · 명암 보정"],
       ["처리 시간", Object.entries(im.timing || {}).map(([k, v]) => `${{ download: "내려받기", prepare: "준비", ocr: "OCR" }[k] || k} ${v}초`).join(" · ") || "-"],
       ["화면 표시 상태", im.dom_hidden && im.dom_hidden.length ? `숨겨진 이미지(${im.dom_hidden.join(", ")}) — 광고성 판단과 별도로 기록` : "화면에 표시되는 이미지"],
-      ["사용한 주소", `${im.src_via || "-"}${im.shown_src && im.shown_src !== im.img_url ? ` · 브라우저 표시 주소: ${im.shown_src}` : ""}`],
+      ["사용한 주소", `${im.src_via || "-"}${im.shown_src && im.shown_src !== im.img_url ? ` · 브라우저 표시 주소: ${im.shown_src}` : ""}` +
+        (im.first_source ? ` · 먼저 읽은 이미지(${im.first_source.img_url})에서는 의심 근거가 없어 더 큰 후보를 확인함` : "")],
+      ["프레임", im.frame_chain && im.frame_chain.length ? im.frame_chain.join("  ›  ") : "최상위 문서"],
       ["재사용", im.cache_hit ? "같은 내용의 이미지 OCR 결과를 재사용(위치는 이 요소)" : "아니오"],
       ["참고", (im.verdict && im.verdict.note) || "-"],
     ];

@@ -79,3 +79,53 @@ def test_windows_ocr_reads_committed_images():
     ko = asyncio.run(read("ad_ko.png"))
     assert "카지노" in ko and "TEST77" in ko
     assert "도박" in asyncio.run(read("prevention.png"))
+
+
+# ---------------------------------------------------------------- collection range, limits, stop
+def _scan_with_fake_ocr(monkeypatch, tmp_path, **limits):
+    from clearweb import scanner
+    monkeypatch.setattr(scanner, "runs_dir", lambda: tmp_path / "runs")
+    monkeypatch.setattr(scanner.ocr, "engine_status", lambda: (True, "fake engine"))
+    cfg = scanner.ScanConfig(ocr_enabled=True)
+    for k, v in limits.items():
+        setattr(cfg.ocr_limits, k, v)
+    sc = scanner.Scan("http://x/", cfg, tmp_path)
+    sc._t0 = __import__("time").monotonic()
+
+    async def fake_one(ctx, item, img_dir):
+        item.update(level="none", ocr_text="", verdict={"level": "none"})
+
+    monkeypatch.setattr(sc, "_ocr_one", fake_one)
+    return sc
+
+
+def _cand(page, sel, chain=()):
+    return {"k": 0, "url": f"http://x/img/{sel}.png", "selector": sel, "page_url": page, "frame_chain": list(chain), "frame_url": page}
+
+
+def test_images_of_sub_pages_and_frames_keep_their_own_location(monkeypatch, tmp_path):
+    sc = _scan_with_fake_ocr(monkeypatch, tmp_path)
+    chain = ['iframe[src="http://x/f.html"]']
+    asyncio.run(sc._ocr_stage(None, {"url": "http://x/", "depth": 0}, [_cand("http://x/", "img.a")]))
+    asyncio.run(sc._ocr_stage(None, {"url": "http://x/sub", "depth": 1},
+                              [_cand("http://x/sub", "img.a"), _cand("http://x/sub", "img.b", chain), _cand("http://x/sub", "img.a")]))
+    locs = [(i["page_url"], i["location"]) for i in sc.images]
+    assert locs == [("http://x/", "img.a"), ("http://x/sub", "img.a"), ("http://x/sub", 'iframe[src="http://x/f.html"] >>> img.b')]
+    assert sc.ocr_record["coverage"]["pages_collected"] == 2
+
+
+def test_image_limits_are_per_page_and_per_scan(monkeypatch, tmp_path):
+    sc = _scan_with_fake_ocr(monkeypatch, tmp_path, max_images=2, max_total_images=3)
+    asyncio.run(sc._ocr_stage(None, {"url": "http://x/", "depth": 0}, [_cand("http://x/", f"img.a{k}") for k in range(3)]))
+    asyncio.run(sc._ocr_stage(None, {"url": "http://x/b", "depth": 1}, [_cand("http://x/b", f"img.b{k}") for k in range(2)]))
+    assert [i["status"] for i in sc.images] == ["ok", "ok", "skipped", "ok", "skipped"]
+    assert "페이지당" in sc.images[2]["reason"] and "전체 이미지 수" in sc.images[4]["reason"]
+
+
+def test_stop_and_unloaded_pages_are_recorded_not_hidden(monkeypatch, tmp_path):
+    sc = _scan_with_fake_ocr(monkeypatch, tmp_path)
+    asyncio.run(sc._ocr_stage(None, {"url": "http://x/blocked", "status": "blocked", "error": "보안 확인"}, None))
+    assert sc.ocr_record["not_collected"][0]["url"] == "http://x/blocked" and not sc.images
+    sc.cancel.set()
+    asyncio.run(sc._ocr_stage(None, {"url": "http://x/", "depth": 0}, [_cand("http://x/", "img.a")]))
+    assert sc.images[0]["status"] == "stopped"

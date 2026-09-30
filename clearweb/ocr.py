@@ -34,14 +34,15 @@ INSTALL_HELP_LANGUAGE = (
 
 @dataclass
 class OcrLimits:
-    max_images: int = 40            # images per entry page
+    max_images: int = 40            # images per page (top document + frames)
+    max_total_images: int = 300     # images per scan
     max_bytes: int = 8_000_000      # downloaded file size
     max_pixels: int = 40_000_000    # refuse to decode larger images (decompression bombs)
     max_side: int = 2400            # larger images are scaled down before OCR
     upscale_below: int = 700        # images whose longer side is smaller are enlarged x2
     min_natural: tuple = (40, 16)   # skip icons / spacers smaller than this
     download_timeout_s: float = 8.0
-    total_budget_s: float = 90.0    # all image work on the entry page
+    total_budget_s: float = 120.0   # all image work of one scan (downloads + OCR)
 
     def as_dict(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}

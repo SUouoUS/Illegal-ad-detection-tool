@@ -46,6 +46,13 @@ def main():
     lines("small.png", ["토토 미리보기"], fs=16, size=(300, 60))
     lines("hidden_ad.png", ["출장안마 24시 후불 문의 텔레 @test_demo"])
     Image.new("RGB", (1, 1), (255, 255, 255)).save(OUT / "placeholder.gif")
+    # sub page / iframe / nested iframe cases (collection-range tests)
+    lines("s_ad.png", ["홀덤 토너먼트 참가 즉시", "첫충 40% 가입코드 SUB11"], bg=(235, 245, 255))
+    lines("s_normal.png", ["가을 걷기 행사 참가자 모집", "접수 기간 10월 1일~15일"], bg=(240, 250, 235))
+    lines("s_lazy_ad.png", ["안전놀이터 추천 코드 LAZY5", "텔레그램 @sub_demo"], bg=(255, 245, 225))
+    lines("f_ad.png", ["파워볼 분석 무료 가입코드 FRM22", "문의 카톡 frame_demo"], bg=(250, 235, 245))
+    lines("f_normal.png", ["도서관 휴관일 안내", "매주 월요일은 쉽니다"])
+    lines("n_ad.png", ["스포츠토토 첫충 매충 가입코드 NEST3"], bg=(230, 240, 250))
     for i in range(24):                              # for the stop-while-processing test
         lines(f"many_{i:02d}.png", [f"공지 {i + 1}번 안내 문구입니다", "행사 일정은 누리집을 참고하세요"], fs=30)
 

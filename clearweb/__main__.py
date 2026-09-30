@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--budget", type=float, default=None, help="전체 시간 예산(초, 기본 1500)")
     s.add_argument("--concurrency", type=int, default=None, help="동시 점검 페이지 수 (기본 4)")
     s.add_argument("--no-follow", action="store_true", help="입력한 페이지만 점검(하위 페이지 탐색 안 함)")
-    s.add_argument("--ocr", action="store_true", help="진입 페이지 이미지 속 글자 검사(Windows OCR, 기본 꺼짐)")
+    s.add_argument("--ocr", action="store_true", help="방문한 페이지의 이미지(img) 속 글자 검사(Windows OCR, 기본 꺼짐)")
     g = sub.add_parser("serve", help="start the local screen")
     g.add_argument("--port", type=int, default=8765)
     g.add_argument("--no-browser", action="store_true")
