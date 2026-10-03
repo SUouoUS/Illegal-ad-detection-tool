@@ -30,9 +30,15 @@ class Rules:
         self.cta = d["cta"]
         cp = d["contact_patterns"]
         self.mention = [re.compile(p, re.I) for p in cp["mention"]]
-        self.identifier = [re.compile(p, re.I) for p in cp["identifier"]]
+        self.private = [re.compile(p, re.I) for p in cp["identifier"]]
+        self.web = [re.compile(p, re.I) for p in cp.get("web_address", [])]
+        self.identifier = self.web + self.private
         self.code = [re.compile(p) for p in cp.get("code", [])]
         self.contact = self.mention + self.identifier
+        self.cta_sq = [(t, _squash(t.lower())) for t in self.cta]
+        self.ordinary = {k: tuple(_squash(w.lower()) for w in v)
+                         for k, v in d.get("ordinary_words", {}).items() if not k.startswith("_")}
+        self.cta_inquiry = set(d.get("cta_inquiry", []))
         self.benign = d["benign"]["terms"]
         self.benign_sq = [(t, _squash(t)) for t in self.benign]   # squashed once, not per call
         self.chosung = {k: v for k, v in d["chosung"].items() if not k.startswith("_")}
@@ -62,27 +68,71 @@ def _squash(s: str) -> str:
     return _WS.sub("", s)
 
 
-def term_hits(text: str) -> dict[str, set[str]]:
-    """Return {'strong': {...}, 'weak': {...}} lexicon hits with 'category:term' labels."""
+class _Spaced:
+    """Text with spaces removed, mapped back to the original positions.
+
+    Ads split words with spaces ("카 지 노") so terms are searched without spaces, but a
+    match may not begin in the middle of a word: "청와대 출입" must not read as "대출".
+    A match inside one word, or starting at a word start, is accepted."""
+
+    def __init__(self, text: str):
+        self.text = text
+        self.pos = [k for k, ch in enumerate(text) if not ch.isspace()]
+        self.sq = "".join(text[k] for k in self.pos)
+
+    def find(self, term_sq: str, ordinary: tuple[str, ...] = ()) -> tuple[int, int] | None:
+        """First acceptable match. `ordinary`: everyday words that contain the term
+        ("오피스" for "오피"); a match inside one of them is skipped, the search goes on, so
+        the same term standing on its own elsewhere in the text still matches."""
+        if not term_sq:
+            return None
+        inside = []
+        for w in ordinary:
+            j = self.sq.find(w)
+            while j != -1:
+                inside.append((j, j + len(w)))
+                j = self.sq.find(w, j + 1)
+        k = self.sq.find(term_sq)
+        while k != -1:
+            a, b = self.pos[k], self.pos[k + len(term_sq) - 1] + 1
+            word_ok = not any(ch.isspace() for ch in self.text[a:b]) or a == 0 or self.text[a - 1].isspace()
+            if word_ok and not any(s <= k and k + len(term_sq) <= e for s, e in inside):
+                return a, b
+            k = self.sq.find(term_sq, k + 1)
+        return None
+
+
+def term_spans(text: str) -> dict[str, dict[str, tuple[int, int]]]:
+    """{'strong': {label: (start, end)}, 'weak': {...}} - where each lexicon term matched
+    in NFC-lowercased `text` ('category:term' labels)."""
     r = rules()
     low = unicodedata.normalize("NFC", text).lower()
-    sq = _squash(low)
-    hits = {"strong": set(), "weak": set()}
+    sp = _Spaced(low)
+    hits: dict[str, dict[str, tuple[int, int]]] = {"strong": {}, "weak": {}}
     for cat, c in r.categories.items():
         for lvl in ("strong", "weak"):
             for t in c.get(lvl, []):
-                if t in sq:
-                    hits[lvl].add(f"{cat}:{t}")
+                m = sp.find(t, r.ordinary.get(t, ()))
+                if m:
+                    hits[lvl][f"{cat}:{t}"] = m
     for (cat, lvl, w), rx in r._latin.items():
-        if rx.search(low):
-            hits["strong" if lvl == "latin_strong" else "weak"].add(f"{cat}:{w}")
+        m = rx.search(low)
+        if m:
+            hits["strong" if lvl == "latin_strong" else "weak"][f"{cat}:{w}"] = m.span()
     for k, v in r.chosung.items():
-        if k in sq:
-            hits["strong"].add(f"gambling:{v}({k})")
+        m = sp.find(k)
+        if m:
+            hits["strong"][f"gambling:{v}({k})"] = m
     # a strong term implies its own sub-words: drop weak hits contained in a strong hit
     strong_terms = [h.split(":", 1)[1] for h in hits["strong"]]
-    hits["weak"] = {h for h in hits["weak"] if not any(h.split(":", 1)[1] in s for s in strong_terms)}
+    hits["weak"] = {h: m for h, m in hits["weak"].items() if not any(h.split(":", 1)[1] in s for s in strong_terms)}
     return hits
+
+
+def term_hits(text: str) -> dict[str, set[str]]:
+    """Return {'strong': {...}, 'weak': {...}} lexicon hits with 'category:term' labels."""
+    h = term_spans(text)
+    return {"strong": set(h["strong"]), "weak": set(h["weak"])}
 
 
 @dataclass
@@ -96,6 +146,8 @@ class Verdict:
     cta: set[str] = field(default_factory=set)
     contact: list[str] = field(default_factory=list)
     code: list[str] = field(default_factory=list)
+    # what matched where: {"kind", "rule", "text", "where" (원문/복원문), "pos"} - technical detail
+    matches: list[dict] = field(default_factory=list)
 
 
 def adjudge(raw: str, restored: str, concealed: bool = False, obfuscated: bool = False) -> Verdict:
@@ -111,37 +163,81 @@ def adjudge(raw: str, restored: str, concealed: bool = False, obfuscated: bool =
     """
     r = rules()
     text = restored + "\n" + raw
-    h = term_hits(text)
     sq = _squash(text.lower())
-    cta = {t for t in r.cta if t in sq}
-    contact = []
-    for rx in r.contact:
-        m = rx.search(restored) or rx.search(raw)
-        if m:
-            contact.append(m.group(0).strip())
-    code = []
-    for rx in r.code:
-        m = rx.search(raw) or rx.search(restored)
-        if m and m.group(0).strip() not in code:
-            code.append(m.group(0).strip())
+    matches: list[dict] = []
+    views = [("원문", raw)] + ([("복원문", restored)] if restored != raw else [])
+
+    def note(kind, rule, where, s, a, b):
+        matches.append({"kind": kind, "rule": rule, "text": s[a:b], "where": where, "pos": a})
+
+    h = {"strong": set(), "weak": set()}
+    for where, t in views:
+        sp = term_spans(t)
+        low = unicodedata.normalize("NFC", t).lower()
+        for lvl, kind in (("strong", "주제어"), ("weak", "보조 주제어")):
+            for lab, (a, b) in sp[lvl].items():
+                if lab not in h[lvl]:
+                    h[lvl].add(lab)
+                    note(kind, lab.split(":", 1)[1], where, low, a, b)
+    h["weak"] = {x for x in h["weak"] if not any(x.split(":", 1)[1] in s.split(":", 1)[1] for s in h["strong"])}
+    cta = set()
+    for where, t in views:
+        sp = _Spaced(unicodedata.normalize("NFC", t).lower())
+        for c, c_sq in r.cta_sq:
+            if c not in cta and (m := sp.find(c_sq)):
+                cta.add(c)
+                note("유도 표현", c, where, sp.text, *m)
+
+    def found(patterns, kind, order):
+        out = []
+        for rx in patterns:
+            for where, t in sorted(views, key=lambda x: order.index(x[0])):
+                m = rx.search(t)
+                if m:
+                    s = m.group(0).strip()
+                    # one address matched by two patterns (full URL and bare domain) counts once
+                    if not any(s in o or o in s for o, _ in out):
+                        out.append((s, rx))
+                        note(kind, s, where, t, m.start(), m.end())
+                    break
+        return out
+
+    mention = found(r.mention, "연락·접속 수단", ["복원문", "원문"])
+    private = found(r.private, "연락·접속 수단", ["복원문", "원문"])
+    web = [x for x in found(r.web, "연락·접속 수단", ["복원문", "원문"])
+           if not any(x[0] in o or o in x[0] for o, _ in private)]
+    contact = [s for s, _ in mention + private + web]
+    code = [s for s, _ in found(r.code, "가입·추천 코드", ["원문", "복원문"])]
     benign = sorted({t for t, t_sq in r.benign_sq if t_sq in sq})
 
     S, W, C, T = len(h["strong"]), len(h["weak"]), len(cta), len(contact) + len(code)
-    v = Verdict(False, strong=h["strong"], weak=h["weak"], cta=cta, contact=contact, code=code)
+    # a reachable private channel (phone, messenger, @handle) or code, versus only an
+    # ordinary web address - public notices link to homepages all the time
+    P = len(mention) + len(private) + len(code)
+    # inquiry words (문의, 상담) are in every public notice: together they count as one
+    C2 = len(cta - r.cta_inquiry) + (1 if cta & r.cta_inquiry else 0)
+    v = Verdict(False, strong=h["strong"], weak=h["weak"], cta=cta, contact=contact, code=code, matches=matches)
     v.categories = {x.split(":")[0] for x in h["strong"] | h["weak"]}
     short = len(_squash(restored)) <= 40
 
     ok = (
         (S >= 1 and (C >= 1 or T >= 1 or S >= 2 or W >= 1))
-        or (W >= 1 and T >= 1 and (C >= 1 or W >= 2))
+        # one ambiguous word (대출, 성인, 충전 ...) with only a web address also needs a
+        # second topic word or two calls to action; a private channel is enough
+        or (W >= 1 and T >= 1 and (C >= 1 or W >= 2) and (P >= 1 or W >= 2 or C2 >= 2))
         or (W >= 2 and C >= 2)
         or (S >= 1 and short and obfuscated)
     )
     if not ok:
         return v
+    if S == 0 and P == 0 and not _clustered(matches, r.cta_inquiry):
+        # only ambiguous words and web addresses, spread over a long notice ("대상: 성인 80명
+        # ... 수강료: 무료 ... 신청: https://... 문의"): in an ad they stand together
+        v.excluded_by = ["근거가 긴 안내문 여러 곳에 흩어져 있음"]
+        return v
 
     # context: prevention / news / education / enforcement wording
-    handle = bool(code) or any(rx.search(restored) or rx.search(raw) for rx in r.identifier)
+    handle = bool(code) or bool(private) or bool(web)
     if benign and (not handle or len(benign) >= 2) and not (S >= 2 and C >= 2 and handle):
         v.excluded_by = benign
         return v
@@ -161,6 +257,25 @@ def adjudge(raw: str, restored: str, concealed: bool = False, obfuscated: bool =
     if S >= 1 and short and obfuscated and not (C or T or W or S >= 2):
         v.reasons.append("짧은 주제어가 글자 변형으로 위장됨")
     return v
+
+
+CLUSTER_CHARS = 60
+
+
+def _clustered(matches: list[dict], inquiry: set, width: int = CLUSTER_CHARS) -> bool:
+    """Weak-only evidence must meet the ad rule inside one stretch of `width` characters
+    of the same text (원문 or 복원문)."""
+    for where in {m["where"] for m in matches}:
+        ms = sorted((m for m in matches if m["where"] == where), key=lambda m: m["pos"])
+        for i, first in enumerate(ms):
+            win = [m for m in ms[i:] if m["pos"] + len(m["text"]) <= first["pos"] + width]
+            w = {m["rule"] for m in win if m["kind"] == "보조 주제어"}
+            c = {m["rule"] for m in win if m["kind"] == "유도 표현"}
+            t = [m for m in win if m["kind"] in ("연락·접속 수단", "가입·추천 코드")]
+            c2 = len(c - inquiry) + (1 if c & inquiry else 0)
+            if (w and t and (c or len(w) >= 2) and (len(w) >= 2 or c2 >= 2)) or (len(w) >= 2 and len(c) >= 2):
+                return True
+    return False
 
 
 def _lbl(hit: str, labels: dict) -> str:
@@ -227,6 +342,7 @@ class Candidate:
     tech_reasons: list[str]
     unit: int                  # ad unit record index (for grouping in the UI)
     changes: list[dict] = field(default_factory=list)
+    ad_matches: list[dict] = field(default_factory=list)
 
 
 def analyze_frame(nodes: list[dict], report_excluded: bool = True,
@@ -325,7 +441,8 @@ def analyze_frame(nodes: list[dict], report_excluded: bool = True,
             seen_roots.add(root)
             excluded.append({"index": i, "text": _collapse(by_i[i]["text"])[:200],
                              "hiding": sig[0]["detail"],
-                             "reason": "예방·보도·안내 문맥: " + ", ".join(v.excluded_by[:5])})
+                             "reason": (v.excluded_by[0] if v.excluded_by[0].startswith("근거가")
+                                        else "예방·보도·안내 문맥: " + ", ".join(v.excluded_by[:5]))})
 
     cands: list[Candidate] = []
 
@@ -371,18 +488,21 @@ def analyze_frame(nodes: list[dict], report_excluded: bool = True,
             rt = by_i[r]["text"]
             rrs = restore(rt)
             hv = adjudge(rt, rrs.text, concealed=True, obfuscated=bool(rrs.changes))
-            if hv.strong or hv.weak or hv.contact or len(hv.cta) >= 1:
+            # the hidden part must carry evidence of its own; a CTA word alone ("문의") is not
+            if hv.strong or hv.weak or hv.contact or hv.code:
                 reported_hidden = True
+                scope = [f"판정 범위: 숨긴 부분이 속한 상위 문구 전체({len(_squash(n['text']))}자)",
+                         "숨긴 부분의 근거: " + ", ".join(_evidence_terms(hv))]
                 for t, why in tmap.items():
-                    cands.append(_cand(r, t, by_i, rrs, v, why + ["광고 문구의 일부가 숨겨짐"], u))
+                    cands.append(_cand(r, t, by_i, rrs, v, why + ["광고 문구의 일부가 숨겨짐"], u, scope))
                 for t, why in obfuscation(rt, True).items():
-                    cands.append(_cand(r, t, by_i, rrs, v, why, u))
+                    cands.append(_cand(r, t, by_i, rrs, v, why, u, scope))
         if not reported_hidden:
             for t, why in obf.items():
                 cands.append(_cand(u, t, by_i, rs, v, why, u))
             if not obf and visible is not None:
                 visible.append({"index": u, "evidence": _collapse(n["text"])[:500], "restored": _collapse(rs.text)[:500],
-                                "ad_reasons": list(v.reasons),
+                                "ad_reasons": list(v.reasons), "ad_matches": _matches(v),
                                 "excluded_why": "숨김·위장(공식 4종 기법)이 확인되지 않아 공식 결과(result.json)에서 제외"})
 
     # 3) group units under one hidden root that holds nothing but ad text
@@ -419,14 +539,24 @@ def _is_composite(i: int, by_i: dict, children: dict, hrefs: dict) -> bool:
     return False
 
 
-def _cand(loc, t, by_i, rs, v, why, unit) -> Candidate:
+def _cand(loc, t, by_i, rs, v, why, unit, scope=None) -> Candidate:
     return Candidate(
         index=loc, technique=t,
         evidence=_collapse(by_i[loc]["text"])[:500],
         restored=_collapse(rs.text)[:500],
-        ad_reasons=list(v.reasons), tech_reasons=list(why), unit=unit,
+        ad_reasons=list(v.reasons) + list(scope or []), tech_reasons=list(why), unit=unit,
         changes=[{"kind": c.kind, "src": c.src, "dst": c.dst} for c in rs.changes][:20],
+        ad_matches=_matches(v),
     )
+
+
+def _matches(v: Verdict, limit: int = 12) -> list[dict]:
+    """Matched strings and their positions, for the technical detail."""
+    return [dict(m, text=m["text"][:60]) for m in v.matches[:limit]]
+
+
+def _evidence_terms(v: Verdict) -> list[str]:
+    return ([x.split(":", 1)[1] for x in sorted(v.strong | v.weak)] + v.contact[:2] + v.code[:2]) or ["-"]
 
 
 def _merge_pure_roots(cands, by_i, info, ancestors):

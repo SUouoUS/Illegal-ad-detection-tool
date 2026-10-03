@@ -5,7 +5,19 @@
 // Elements are kept in window.__cwNodes so selectors can be built later by index.
 (() => {
   const MAX_TEXT = 600;
-  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "HEAD", "META", "LINK", "IFRAME", "FRAME", "OBJECT", "CANVAS"]);
+  // Some pages replace window.Map / Set with their own objects (no get/set/has), so the
+  // collector keeps its lookups on plain objects and element-keyed maps of its own.
+  const SKIP = {};
+  for (const t of ["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "HEAD", "META", "LINK", "IFRAME", "FRAME", "OBJECT", "CANVAS"]) SKIP[t] = true;
+  const elMap = () => {
+    try {
+      const w = new WeakMap(), k = {};
+      w.set(k, 1);
+      if (w.get(k) === 1 && w.has(k)) return w;
+    } catch (e) { /* replaced or missing */ }
+    const key = "__cwk" + Math.random().toString(36).slice(2);
+    return { get: (e) => e[key], set: (e, v) => { e[key] = v; }, has: (e) => Object.prototype.hasOwnProperty.call(e, key) };
+  };
   const doc = document;
   const root = doc.body || doc.documentElement;
   if (!root) return { nodes: [], doc: {} };
@@ -15,7 +27,7 @@
   const docW = Math.max(doc.documentElement.scrollWidth, root.scrollWidth || 0, vw);
   const docH = Math.max(doc.documentElement.scrollHeight, root.scrollHeight || 0, vh);
 
-  const styleCache = new Map();
+  const styleCache = elMap();
   const cs = (el) => {
     let s = styleCache.get(el);
     if (!s) { s = getComputedStyle(el); styleCache.set(el, s); }
@@ -57,9 +69,9 @@
   const px = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
 
   const nodes = [];
-  const index = new Map();
+  const index = elMap();
   const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
-    acceptNode: (n) => SKIP.has(n.tagName.toUpperCase()) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    acceptNode: (n) => SKIP[n.tagName.toUpperCase()] === true ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
   });
 
   const list = [root];
@@ -69,7 +81,7 @@
     // textContent without script/style content
     let out = "";
     const w = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
-      acceptNode: (n) => (n.nodeType === 1 && SKIP.has(n.tagName.toUpperCase())) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+      acceptNode: (n) => (n.nodeType === 1 && SKIP[n.tagName.toUpperCase()] === true) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
     });
     for (let n = w.nextNode(); n; n = w.nextNode()) {
       if (n.nodeType === 3) { out += n.nodeValue; if (out.length > MAX_TEXT * 2) return null; }
@@ -90,7 +102,16 @@
     for (let e = el.parentElement; e && e.nodeType === 1 && e !== doc.documentElement; e = e.parentElement) {
       const s = cs(e);
       if (s.overflowX !== "visible" || s.overflowY !== "visible" || s.contain.includes("paint")) {
-        const pr = e.getBoundingClientRect();
+        const b = e.getBoundingClientRect();
+        // a scroll box the reader can actually use (overflow auto/scroll with a real
+        // viewport, e.g. a page that scrolls inside <body>) clips nothing on that axis:
+        // content below its first screen is reachable by scrolling, not hidden
+        const usable = e.clientWidth >= 20 && e.clientHeight >= 20;
+        const sx2 = usable && /auto|scroll|overlay/.test(s.overflowX), sy2 = usable && /auto|scroll|overlay/.test(s.overflowY);
+        const pr = {
+          left: sx2 ? b.left - e.scrollLeft : b.left, right: sx2 ? b.left - e.scrollLeft + Math.max(e.scrollWidth, b.width) : b.right,
+          top: sy2 ? b.top - e.scrollTop : b.top, bottom: sy2 ? b.top - e.scrollTop + Math.max(e.scrollHeight, b.height) : b.bottom,
+        };
         const nx1 = Math.max(x1, pr.left), ny1 = Math.max(y1, pr.top), nx2 = Math.min(x2, pr.right), ny2 = Math.min(y2, pr.bottom);
         if ((nx2 - nx1) * (ny2 - ny1) < (x2 - x1) * (y2 - y1) && !clipper) clipper = e;
         x1 = nx1; y1 = ny1; x2 = nx2; y2 = ny2;
