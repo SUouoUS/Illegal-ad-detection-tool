@@ -35,8 +35,12 @@ LOW_VALUE_TOKEN = {
     "search", "srch", "write", "modify", "edit", "reply", "recommend", "recom", "vote", "like",
     "report", "singo", "scrap", "download", "filedown", "down", "print", "share", "sns", "rss",
     "captcha", "password", "passwd", "pwd", "findid", "findpw", "mypage", "cart", "order",
+    "idsearch", "pwsearch", "searchid", "searchpw", "idfind", "pwfind",
     "payment", "subscribe",
 }
+# account-only pages: these words are checked in every query value too (schM=mypage_update)
+ACCOUNT_TOKEN = {"login", "logon", "signin", "signup", "mypage", "password", "passwd", "findid", "findpw",
+                 "idsearch", "pwsearch", "searchid", "searchpw", "idfind", "pwfind"}
 # query keys whose *values* name an action (mode=write, act=login ...)
 ACTION_KEYS = {"mode", "act", "action", "cmd", "command", "method", "proc", "task", "flag", "type", "job"}
 
@@ -69,15 +73,22 @@ def low_value_reason(url: str) -> str | None:
     for k, v in parse_qsl(s.query, keep_blank_values=True):
         if k.lower() in ACTION_KEYS:
             toks |= _tokens(v)
+        else:
+            toks |= _tokens(v) & ACCOUNT_TOKEN
     hit = toks & LOW_VALUE_TOKEN
     return sorted(hit)[0] if hit else None
 
 
+_SESSION_PATH = re.compile(r";(?:jsessionid|phpsessid|sid)=[^/?#;]*", re.I)
+
+
 def strip_tracking(url: str) -> str:
+    """Drop parameters that never change page content: tracking query parameters and a session
+    id written into the path (list.do;jsessionid=...). Every other parameter is kept."""
     s = urlsplit(url)
     q = [(k, v) for k, v in parse_qsl(s.query, keep_blank_values=True)
          if not (k.lower() in TRACKING or k.lower().startswith("utm_"))]
-    return urlunsplit((s.scheme, s.netloc, s.path, urlencode(q, doseq=True), s.fragment))
+    return urlunsplit((s.scheme, s.netloc, _SESSION_PATH.sub("", s.path), urlencode(q, doseq=True), s.fragment))
 
 
 def site_of(host: str) -> str:
@@ -113,6 +124,34 @@ class Policy:
         e = urlsplit(strip_tracking(clean(self.entry)))
         self.queries.setdefault(site_of(e.netloc) + e.path, []).append(
             (frozenset(parse_qsl(e.query, keep_blank_values=True)), compare_key(strip_tracking(clean(self.entry)))))
+
+    # Links left unvisited by the time/page limit (or a stop) are not final: a continued
+    # scan takes them up again, so their counts start from zero there.
+    RESUMABLE = ("시간 예산 도달", "최대 페이지 수 제한", "중단으로 미방문")
+
+    def to_state(self) -> dict:
+        """Everything a continued scan needs to skip what this one already saw or rejected."""
+        return {"sites": sorted(self.sites), "seen": sorted(self.seen), "limited": dict(self.limited),
+                "pattern_count": dict(self.pattern_count), "admitted": self.admitted,
+                "skipped": {k: v for k, v in self.skipped.items() if k not in self.RESUMABLE},
+                "skipped_n": {k: v for k, v in self.skipped_n.items() if k not in self.RESUMABLE},
+                "queries": {k: [[sorted(map(list, q)), key] for q, key in v] for k, v in self.queries.items()},
+                "lateral": {k: sorted(v) for k, v in self.lateral.items()},
+                "superseded": sorted(self.superseded)}
+
+    def load_state(self, st: dict):
+        self.sites |= set(st.get("sites", []))
+        self.seen |= set(st.get("seen", []))
+        self.limited.update(st.get("limited", {}))
+        self.pattern_count.update(st.get("pattern_count", {}))
+        self.admitted = st.get("admitted", self.admitted)
+        self.skipped.update(st.get("skipped", {}))
+        self.skipped_n.update(st.get("skipped_n", {}))
+        for k, v in st.get("queries", {}).items():
+            self.queries[k] = [(frozenset(tuple(x) for x in q), key) for q, key in v]
+        for k, v in st.get("lateral", {}).items():
+            self.lateral[k] = set(v)
+        self.superseded |= set(st.get("superseded", []))
 
     def allow_site_of(self, url: str):
         """Also accept the host the entry page redirected to."""
