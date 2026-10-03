@@ -30,9 +30,10 @@
 
   // ------------------------------------------------------------ status
   function displayState(p, rec) {
-    if (rec && rec.pages.length && rec.pages.every((x) => ["failed", "blocked", "http_error"].includes(x.status))) return "unscanned";
+    if (rec && rec.pages.length && rec.pages.every((x) => ["failed", "blocked", "http_error", "file", "restricted", "budget_cut"].includes(x.status))) return "unscanned";
     if (p.state === "done") {
-      const failed = rec ? rec.pages.filter((x) => !["ok", "duplicate"].includes(x.status)).length : p.pages_failed;
+      // pages the site refused to anonymous visitors (restricted) are not a failure of the scan
+      const failed = rec ? rec.pages.filter((x) => !["ok", "partial", "duplicate", "file", "restricted", "budget_cut"].includes(x.status) && !notFailure(x)).length : p.pages_failed;
       if (failed > 0) return "partial";
       const imgHits = rec ? (rec.images || []).filter((x) => x.level === "suspect" || x.level === "uncertain").length + (rec.extra_ads || []).length : 0;
       if ((rec ? rec.result.findings.length : p.findings) === 0 && !imgHits) return "zero";
@@ -40,7 +41,22 @@
     return p.state || "idle";
   }
 
+  // access refused by the site (alert, then blank); records before 0.1.8 kept these as "failed"
+  const isRestricted = (x) => x.status === "restricted" || (x.status === "failed" && /알림창/.test(x.error || ""));
+  // cut because the whole time budget ran out; records before 0.1.9 kept these as "failed"
+  const isCut = (x) => x.status === "budget_cut" || (x.status === "failed" && /전체 시간 예산이 거의 끝나|전체 시간 예산 도달으로/.test(x.error || ""));
+  const notFailure = (x) => isRestricted(x) || isCut(x);
+
+  // page counts from a run record: the same categories the scanner uses
+  function recordCounts(rec) {
+    const n = (...st) => rec.pages.filter((x) => st.includes(x.status)).length;
+    return { pages_done: n("ok", "partial"), pages_failed: rec.pages.filter((x) => ["failed", "blocked", "stopped"].includes(x.status) && !notFailure(x)).length,
+             pages_http_error: n("http_error"), pages_file: n("file"), pages_duplicate: n("duplicate"),
+             pages_restricted: rec.pages.filter(isRestricted).length, pages_cut: rec.pages.filter(isCut).length };
+  }
+
   function renderStatus(p, rec) {
+    if (rec && rec.pages) p = { ...p, ...recordCounts(rec) };
     const ds = displayState(p, rec);
     const st = $("st-state");
     st.textContent = STATE[ds] || ds;
@@ -58,7 +74,12 @@
     let msg = "", bad = false;
     if (p.state === "failed") { msg = p.end_reason || "검사 중 오류가 발생했습니다."; bad = true; }
     else if (p.state === "stopped") msg = "중단되어 점검하지 못한 영역이 있을 수 있습니다.";
-    else if (p.pages_failed > 0) msg = `불러오지 못한 페이지 ${p.pages_failed}개. 자세한 내용은 검사 상세를 참고하세요.`;
+    else if (p.pages_failed > 0 || p.pages_http_error > 0) {
+      // pages that could not be loaded vs. pages the server answered with an error (broken links)
+      const parts = [p.pages_failed ? `불러오지 못한 페이지 ${p.pages_failed}개` : "",
+        p.pages_http_error ? `HTTP 응답 오류 ${p.pages_http_error}개` : ""].filter(Boolean);
+      msg = `${parts.join(", ")}. 자세한 내용은 검사 상세를 참고하세요.`;
+    }
     else if (p.end_reason && /제한|시간/.test(p.end_reason)) msg = p.end_reason;
     if (running && p.stop_requested) msg = "중단 요청됨…";
     alert.hidden = !msg;
@@ -67,13 +88,30 @@
 
     $("st-toggle").hidden = ds === "idle";
     $("sd-current").textContent = running ? (p.current_url || "-") : "-";
-    $("sd-pages").textContent = `점검 ${p.pages_done ?? 0} · 실패 ${p.pages_failed ?? 0} · 대기 ${p.pages_queued ?? 0}` +
+    $("sd-pages").textContent = `점검 ${p.pages_done ?? 0} · 실패 ${p.pages_failed ?? 0}` +
+      (p.pages_http_error ? ` · 응답 오류 ${p.pages_http_error}` : "") + (p.pages_restricted ? ` · 접근 제한 ${p.pages_restricted}` : "") +
+      (p.pages_cut ? ` · 시간 한도로 중단 ${p.pages_cut}` : "") +
+      (p.pages_file ? ` · 파일 링크 ${p.pages_file}` : "") +
+      (p.pages_duplicate ? ` · 이미 점검한 페이지로 이동 ${p.pages_duplicate}` : "") + ` · 대기 ${p.pages_queued ?? 0}` +
       (p.pages_skipped ? ` · 한도로 미방문 ${p.pages_skipped}` : "");
-    $("sd-frames").textContent = `${p.frames_done ?? 0}개${p.frames_failed ? ` (실패 ${p.frames_failed})` : ""}`;
-    $("sd-reason").textContent = p.end_reason || "-";
+    const fNotes = [p.frames_failed ? `실패 ${p.frames_failed}` : "", p.frames_detached ? `점검 중 사라짐 ${p.frames_detached}` : ""].filter(Boolean);
+    $("sd-frames").textContent = `${p.frames_done ?? 0}개${fNotes.length ? ` (${fNotes.join(" · ")})` : ""}`;
+    const gb = (mb) => `${(mb / 1024).toFixed(1)}GB`;
+    $("sd-conc").textContent = !p.concurrency ? "-" : !p.concurrency_auto ? `${p.concurrency}페이지 동시 (고정)`
+      : `${p.concurrency}페이지 동시 (자동 · CPU 상한 ${p.concurrency_cpu_cap} · 메모리 제한 ${p.concurrency_mem_cap}` +
+        (p.free_mb_start ? ` · 남은 메모리 시작 ${gb(p.free_mb_start)} → 최근 ${gb(p.free_mb_last)}` : "") + ")";
+    // the failure part of the end reason is recomputed from the pages (old records counted
+    // slow-but-checked pages as failures); limit notes after " · " are kept as recorded
+    let reason = p.end_reason || "-";
+    if (rec && rec.page_summary !== undefined && /^완료/.test(reason)) {
+      const rest = reason.split(" · ").slice(1);
+      reason = [rec.page_summary ? `완료(${rec.page_summary})` : "완료", ...rest].join(" · ");
+    }
+    $("sd-reason").textContent = reason;
     $("sd-result").textContent = p.result_path || "-";
 
     $("btn-start").disabled = running;
+    if (running) $("btn-resume").hidden = true;
     $("btn-stop").hidden = !running;
     $("btn-stop").disabled = !!p.stop_requested;
     $("url").readOnly = running;
@@ -212,6 +250,8 @@
     });
     renderPages(rec);
     renderSkipped(rec);
+    renderProgress(rec);
+    renderConcurrency(rec);
     renderExcluded(rec);
     renderImages(rec);
     renderCollection(rec);
@@ -227,12 +267,18 @@
     t.hidden = !rec.pages.length;
     for (const pg of rec.pages) {
       const tr = el("tr");
-      const label = { ok: "정상", partial: "일부 로딩", http_error: "응답 오류", failed: "실패", stopped: "중단", duplicate: "중복", blocked: "보안 확인 차단" }[pg.status] || pg.status;
-      tr.append(el("td", pg.status === "ok" ? "s-ok" : ["partial", "duplicate"].includes(pg.status) ? "s-warn" : "s-bad", label));
+      const label = isRestricted(pg) ? "접근 제한" : isCut(pg) ? "시간 한도로 중단" : { ok: "정상", partial: "일부 로딩", http_error: "응답 오류", file: "파일 링크", restricted: "접근 제한", failed: "실패", stopped: "중단", duplicate: "중복", blocked: "보안 확인 차단" }[pg.status] || pg.status;
+      tr.append(el("td", pg.status === "ok" ? "s-ok" : ["partial", "duplicate", "file", "restricted", "budget_cut"].includes(pg.status) || notFailure(pg) ? "s-warn" : "s-bad", label));
       tr.append(el("td", "", pg.url));
-      const fr = pg.frames.filter((f) => f.status !== "ok").length;
-      const notes = [pg.error];
-      if (pg.frames.length > 1 || fr) notes.push(`프레임 ${pg.frames.length}개${fr ? ` (실패 ${fr})` : ""}`);
+      const cnt = (st) => pg.frames.filter((f) => f.status === st).length;
+      const fr = [cnt("failed") ? `실패 ${cnt("failed")}` : "", cnt("blocked") ? `차단·로딩 실패 ${cnt("blocked")}` : "",
+        cnt("detached") ? `점검 중 사라짐 ${cnt("detached")}` : ""].filter(Boolean);
+      const err = pg.status === "partial" && /Timeout/.test(pg.error || "")
+        ? "로딩 제한 시간 초과 — 그때까지 받은 내용으로 점검함" : pg.error;
+      const notes = [err || (["failed", "blocked", "stopped"].includes(pg.status) ? "사유 미기록" : "")];
+      const lastSaid = pg.dialogs && pg.dialogs.length ? pg.dialogs[pg.dialogs.length - 1] : "";
+      if (lastSaid && !(pg.error || "").includes(lastSaid)) notes.push(`알림창: “${pg.dialogs[pg.dialogs.length - 1]}”`);
+      if (pg.frames.length > 1 || fr.length) notes.push(`프레임 ${pg.frames.length}개${fr.length ? ` (${fr.join(" · ")})` : ""}`);
       if (pg.expanded && pg.expanded.length) notes.push(`더보기 ${pg.expanded.length}회 펼침`);
       tr.append(el("td", "", notes.filter(Boolean).join(" · ")));
       tb.append(tr);
@@ -248,9 +294,44 @@
       : `본문을 수집하지 못함 (검사하지 못한 페이지 ${miss}개)`;
     const im = c.images;
     $("sd-img").textContent = !im.enabled ? "꺼짐" : !im.ran ? `실행하지 못함 · ${im.error}`
-      : `이미지 ${im.found}개(페이지 ${(rec.ocr.coverage || {}).pages_collected ?? "-"}곳에서 수집) · OCR 성공 ${im.ok} · 실패 ${im.failed} · 한도·건너뜀 ${im.skipped + im.timeout}` +
+      : `이미지 ${im.found}개(페이지 ${(rec.ocr.coverage || {}).pages_collected ?? "-"}곳에서 수집${im.files != null ? `, 서로 다른 파일 ${im.files}개` : ""}) · ` +
+        `글자 인식 완료 ${im.ok}${im.with_text != null ? `(글자가 나온 이미지 ${im.with_text})` : ""} · 실패 ${im.failed} · 건너뜀 ${im.skipped + im.timeout}` +
+        (im.skipped_by && Object.keys(im.skipped_by).length ? `(${Object.entries(im.skipped_by).map(([k, n]) => `${k} ${n}`).join(", ")})` : "") +
         (im.stopped ? ` · 중단 ${im.stopped}` : "") +
         ((rec.ocr.coverage || {}).pages_not_collected ? ` · 이미지를 수집하지 못한 페이지 ${rec.ocr.coverage.pages_not_collected}개` : "");
+  }
+
+  // where the scan stopped, and whether it can be continued from there
+  function renderProgress(rec) {
+    const left = (rec.resume && rec.resume.pending) || [];
+    const checked = rec.pages.filter((x) => ["ok", "partial"].includes(x.status));
+    const last = checked.length ? checked[checked.length - 1].url : "-";
+    const depths = checked.map((x) => x.depth).filter((d) => typeof d === "number");
+    const parts = [`점검한 페이지 ${checked.length}개` + (depths.length ? `(링크 ${Math.max(...depths)}번 따라간 곳까지)` : ""),
+      `마지막으로 점검한 페이지 ${last}`];
+    if (rec.continued_from) parts.push(`이어서 검사한 기록(이전 기록 ${rec.continued_from}, 누적 ${mmss(rec.elapsed_total_sec)})`);
+    parts.push(left.length ? `시간·페이지 한도나 중단으로 남은 링크 ${left.length}개 — ‘이어서 검사’로 이 지점부터 계속할 수 있습니다`
+      : "남은 링크 없음");
+    $("sd-progress").textContent = parts.join(" · ");
+    $("btn-resume").hidden = !left.length;
+    $("btn-resume").dataset.run = left.length ? rec.run_id : "";
+    $("btn-resume").title = left.length ? `남은 링크 ${left.length}개를 이어서 검사합니다(현재 검사 설정의 페이지 수·시간 한도 적용)` : "";
+  }
+
+  function renderConcurrency(rec) {
+    const c = rec.concurrency;
+    if (!c || !c.start) return;
+    if (c.mode !== "자동") { $("sd-conc").textContent = `${c.start}페이지 동시 (고정)`; return; }
+    const gb = (mb) => (mb || mb === 0) ? `${(mb / 1024).toFixed(1)}GB` : "-";
+    const hist = c.history || [];
+    const steps = [c.start, ...hist.filter((h) => h.kind !== "메모리 상한").map((h) => h.next)].filter((v, k, a) => k === 0 || v !== a[k - 1]);
+    const head = `자동 조절 ${steps.join(" → ")}페이지 (논리 프로세서 ${c.processors}개 · CPU 상한 ${c.cpu_cap ?? c.max}` +
+      (c.mem_cap_start !== undefined ? ` · 메모리 제한 시작 ${c.mem_cap_start} → 끝 ${c.mem_cap_last ?? c.mem_cap_start}` : "") +
+      (c.free_mb_start ? ` · 남은 메모리 시작 ${gb(c.free_mb_start)} → 최근 ${gb(c.free_mb_last ?? c.free_mb_start)}` : "") + ")";
+    // changes with time and reason (newer records); older records only had "next"/"why"
+    const lines = hist.filter((h) => h.kind || h.next !== h.limit).slice(-8)
+      .map((h) => (h.t !== undefined ? `${mmss(h.t)} ` : "") + h.why);
+    $("sd-conc").replaceChildren(el("div", "", head), ...lines.map((x) => el("div", "", x)));
   }
 
   function renderSkipped(rec) {
@@ -275,11 +356,12 @@
   // ------------------------------------------------------------ reason sentence
   // Built only from what the detector recorded (ad_reasons / techniques).
   function parseReasons(lines) {
-    const out = { strong: [], weak: [], cta: [], contact: [], code: [], shortHidden: false };
+    const out = { strong: [], weak: [], cta: [], contact: [], code: [], shortHidden: false, scope: false };
     const key = { "주제어": "strong", "보조 주제어": "weak", "유도 표현": "cta", "연락·접속 수단": "contact", "가입·추천 코드": "code" };
     for (const line of lines || []) {
       const m = line.match(/^([^:]+):\s*(.*)$/);
       if (m && key[m[1]]) out[key[m[1]]] = m[2].split(/,\s*/).filter(Boolean);
+      else if (/^판정 범위:/.test(line)) out.scope = true;
       else if (/위장됨|의도적으로 숨김/.test(line)) out.shortHidden = true;
     }
     return out;
@@ -306,6 +388,8 @@
     if (cta.length) parts.push(`${cta.join("·")} 표현`);
     if (codes.length) parts.push(`가입·추천 코드(${codes.join(", ")})`);
     if (contact.length) parts.push(`접속·연락 수단(${contact.join(", ")})`);
+    // the ad judgement covered the enclosing text, not only the hidden part: say so
+    if (parts.length && r.scope) return `${phrase} 부분이 속한 ${topic} 문구에 ${parts.join("과 ")}이 포함되어 있습니다.`;
     if (parts.length) return `${phrase} ${topic} 문구에 ${parts.join("과 ")}이 포함되어 있습니다.`;
     if (r.shortHidden) return `${phrase} 짧은 ${topic} 문구입니다. 주제어를 글자 변형으로 위장한 것으로 판단했습니다.`;
     const all = topics.concat(weak);
@@ -433,6 +517,7 @@
     a.href = /^https?:/i.test(t.url) ? t.url : "#";
     $("d-frame-note").textContent = frameNote(t);
     $("t-ad").replaceChildren(...(t.ad_reasons || []).map((x) => labeled(x)));
+    showMatches(t.ad_matches);
     $("t-hide").replaceChildren(el("li", "", "해당 없음 — 숨김·위장 기법이 확인되지 않음"));
     $("t-changes-label").hidden = true;
     $("t-changes").hidden = true;
@@ -513,6 +598,15 @@
     return li;
   }
 
+  // which rule matched which characters (position counted in the analysed text)
+  function showMatches(ms) {
+    const list = ms || [];
+    $("t-match-label").hidden = !list.length;
+    $("t-match-wrap").hidden = !list.length;
+    $("t-match").replaceChildren(...list.map((m) =>
+      el("li", "", `${m.kind} ‘${m.rule}’ — ${m.where} ${m.pos + 1}번째 글자 “${m.text}”`)));
+  }
+
   function mergedChanges(items) {
     const kinds = { jamo: "자모 조합", homoglyph: "닮은꼴 문자", leet: "숫자·기호 대체" };
     const by = new Map();
@@ -555,6 +649,7 @@
 
     // technical detail (folded)
     $("t-ad").replaceChildren(...(f0.ad_reasons || []).map((x) => labeled(x)));
+    showMatches(f0.ad_matches);
     const changeText = new Set((f0.changes || []).map((c) => `${c.src} → ${c.dst}`));
     $("t-hide").replaceChildren(...g.items.map((it) => {
       // drop lines that only repeat a character change (shown once under 글자 변환)
@@ -594,12 +689,11 @@
   });
 
   // ------------------------------------------------------------ actions
-  $("scan-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const url = $("url").value.trim();
+  async function startScan(body) {
     const options = { max_depth: $("opt-depth").value, max_pages: $("opt-pages").value, budget_min: $("opt-budget").value,
+                      ...($("opt-conc").value !== "auto" ? { concurrency: $("opt-conc").value } : {}),
                       ocr: $("opt-ocr").checked };
-    const r = await fetch("/api/scans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url, options }) });
+    const r = await fetch("/api/scans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, options }) });
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));
       alert(d.detail || "검사를 시작하지 못했습니다.");
@@ -611,8 +705,19 @@
     $("counts").textContent = "";
     $("excluded-box").hidden = true;
     $("pages").hidden = true;
+    $("btn-resume").hidden = true;
     clearDetail();
     startPolling();
+  }
+
+  $("scan-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    startScan({ url: $("url").value.trim() });
+  });
+
+  $("btn-resume").addEventListener("click", () => {
+    const run = $("btn-resume").dataset.run;
+    if (run) startScan({ resume: run });
   });
 
   $("btn-stop").addEventListener("click", async () => {
@@ -652,6 +757,7 @@
   // ------------------------------------------------------------ scan settings
   const optsSummary = () => {
     $("opts-summary").textContent = `(링크 ${$("opt-depth").value}번 · 최대 ${$("opt-pages").value}페이지 · ${$("opt-budget").value}분` +
+      ($("opt-conc").value !== "auto" ? ` · 동시 ${$("opt-conc").value}` : "") +
       ($("opt-ocr").checked ? " · 이미지 글자 검사)" : ")");
   };
   fetch("/api/defaults").then((r) => r.json()).then((d) => {
@@ -660,9 +766,23 @@
     $("opt-budget").value = Math.round(d.budget_min);
     $("opt-ocr").checked = !!d.ocr;
     $("ocr-status").textContent = d.ocr_available ? "" : `사용할 수 없음: ${d.ocr_message}`;
+    const cp = d.concurrency_plan;
+    if (cp) $("opt-conc").title = `자동: 이 PC(논리 프로세서 ${cp.processors}개)에서 ${cp.start}페이지로 시작해 최대 ${cp.max}페이지까지 조절`;
     optsSummary();
   }).catch(() => {});
-  for (const id of ["opt-depth", "opt-pages", "opt-budget", "opt-ocr"]) $(id).addEventListener("input", optsSummary);
+  for (const id of ["opt-depth", "opt-pages", "opt-budget", "opt-ocr", "opt-conc"]) $(id).addEventListener("input", optsSummary);
 
-  startPolling();
+  // /?run=<run id> shows a saved record instead of the current scan
+  const runParam = new URLSearchParams(location.search).get("run");
+  if (runParam) {
+    fetch(`/api/scans/${encodeURIComponent(runParam)}`, { cache: "no-store" }).then((r) => r.ok ? r.json() : Promise.reject())
+      .then((rec) => {
+        loadedRun = rec.run_id;
+        renderStatus({ state: rec.state, end_reason: rec.end_reason, elapsed_sec: rec.elapsed_sec, result_path: rec.result_path,
+                       run_id: rec.run_id, findings: rec.result.findings.length }, rec);
+        renderRun(rec);
+      }).catch(() => { $("st-alert").hidden = false; $("st-alert").textContent = `검사 기록 ${runParam}을(를) 찾지 못했습니다.`; });
+  } else {
+    startPolling();
+  }
 })();

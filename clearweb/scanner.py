@@ -16,11 +16,12 @@ import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urldefrag
+from urllib.parse import urldefrag, urlsplit
 
 from playwright.async_api import Browser, Frame, Page, async_playwright
 
 from . import VERSION, ocr, result_writer
+from . import concurrency as conc
 from .crawl import Policy
 from .detect import analyze_frame, judge_image
 from .urlnorm import compare_key
@@ -61,15 +62,16 @@ LINKS_JS = """() => {
     if (!NUMLIKE.test((el.textContent || '').trim()) || !el.parentElement) return false;
     return Array.from(el.parentElement.querySelectorAll('a')).filter((a) => /^\\s*\\d{1,4}\\s*$/.test(a.textContent || '')).length >= 2;
   };
-  const out = new Map();
+  // plain object, not Map: some pages replace window.Map with their own object
+  const out = Object.create(null);
   const add = (u, el) => {
     try {
       if (!u) return;
       const abs = new URL(u, document.baseURI).href;
       const a = area(el), pg = isPager(el);
-      const prev = out.get(abs);
-      if (!prev) out.set(abs, [a, pg]);
-      else out.set(abs, [prev[0] !== 'main' && a === 'main' ? a : prev[0], prev[1] || pg]);
+      const prev = out[abs];
+      if (!prev) out[abs] = [a, pg];
+      else out[abs] = [prev[0] !== 'main' && a === 'main' ? a : prev[0], prev[1] || pg];
     } catch (e) {}
   };
   for (const a of document.querySelectorAll('a[href], area[href]')) add(a.getAttribute('href'), a);
@@ -79,7 +81,7 @@ LINKS_JS = """() => {
     let m; while ((m = rx.exec(code))) add(m[1], el);
   }
   for (const el of document.querySelectorAll('[data-href], [data-url], [data-link]')) add(el.dataset.href || el.dataset.url || el.dataset.link, el);
-  return Array.from(out, ([url, v]) => [url, v[0], v[1]]).slice(0, 3000);
+  return Object.keys(out).map((url) => [url, out[url][0], out[url][1]]).slice(0, 3000);
 }"""
 
 # Controls that reveal more content (comments, list items). Real links are crawled
@@ -99,8 +101,17 @@ EXPAND_JS = """() => {
     out.push(el);
   }
   window.__cwExpand = out;
-  return out.map(e => (e.innerText || e.value || '').trim().slice(0, 30));
+  // where the control sits (tag.class chain of 5 levels, no positions): the same menu toggle
+  // has the same place on every page; a comment loader sits elsewhere
+  const place = (e) => { const parts = [];
+    for (let x = e, i = 0; x && x.nodeType === 1 && i < 5; x = x.parentElement, i++)
+      parts.unshift(x.tagName.toLowerCase() + (x.classList[0] ? '.' + x.classList[0] : ''));
+    return parts.join('>'); };
+  return out.map(e => [(e.innerText || e.value || '').trim().slice(0, 30), place(e)]);
 }"""
+
+# Size of all text in the document, visible or not (a pure show/hide toggle does not change it).
+TEXT_SIZE_JS = "() => (document.documentElement && document.documentElement.textContent || '').length"
 
 # <img> candidates of a document for OCR (entry page only). Picks the URL the browser
 # chose (currentSrc), else the largest srcset candidate, else src; common lazy-loading
@@ -143,7 +154,7 @@ IMG_JS = """() => {
     if (op <= 0.05) hidden.push('opacity:' + op.toFixed(2));
     if (r.width > 0 && (r.right + scrollX <= 0 || r.bottom + scrollY <= 0)) hidden.push('화면 밖 좌표');
     return { k, url: u.startsWith('data:') ? u : abs(u), via, shown: abs(im.currentSrc || ''), alt_url: alt, alt: im.getAttribute('alt') || '',
-             rendered: [Math.round(r.width), Math.round(r.height)], hidden: Array.from(new Set(hidden)) };
+             rendered: [Math.round(r.width), Math.round(r.height)], hidden: hidden.filter((h, k) => hidden.indexOf(h) === k) };
   });
 }"""
 
@@ -188,9 +199,13 @@ class ScanConfig:
     block_resources: bool = True
     max_frame_depth: int = 6
     eval_timeout_s: float = 15.0     # one in-page script call
+    close_timeout_s: float = 5.0     # closing the browser at the end (a stuck close must not hold the results)
     page_budget_s: float = 90.0      # whole page incl. frames
     total_budget_s: float = 1500.0   # whole scan (official limit is 30 min)
-    concurrency: int = 4
+    concurrency: int = 4             # used when concurrency_auto is False
+    concurrency_auto: bool = True    # adjust to the PC while scanning (clearweb/concurrency.py)
+    concurrency_window_s: float | None = None   # throughput/memory decision interval (None: from the budget)
+    concurrency_tick_s: float = 5.0             # emergency memory check interval
     max_pages: int = 50
     max_depth: int = 2
     per_pattern: int = 10            # pages per URL pattern (path with ids generalised + query names)
@@ -210,8 +225,13 @@ class Progress:
     finished_at: str = ""
     elapsed_sec: float = 0.0
     pages_done: int = 0
-    pages_failed: int = 0
+    pages_failed: int = 0          # not loaded: failed / stopped / blocked
+    pages_http_error: int = 0      # the server answered with an error (404 ...), e.g. a broken link on the site
+    pages_file: int = 0            # the link started a file download: not a web page, not a failure
+    pages_restricted: int = 0      # the site refused an anonymous visitor (alert, then a blank page)
+    pages_cut: int = 0             # cut because the whole time budget ran out (kept for a continued scan)
     pages_queued: int = 0
+    pages_duplicate: int = 0       # redirected to a page already checked (counts as a visit attempt)
     pages_skipped: int = 0         # links excluded by limits (depth, pattern, page count, time)
     pages_over_limit: int = 0      # queued links beyond the page limit (will not be visited)
     pages_limit_excluded: int = 0  # links excluded by the page limit (queued beyond it + dropped)
@@ -219,6 +239,13 @@ class Progress:
     images_done: int = 0
     frames_done: int = 0
     frames_failed: int = 0
+    frames_detached: int = 0       # frames removed by the page while being checked (not a failure)
+    concurrency: int = 0           # pages allowed at the same time right now
+    concurrency_auto: bool = False
+    concurrency_cpu_cap: int = 0   # ceiling from logical processors (fixed)
+    concurrency_mem_cap: int = 0   # ceiling from memory (re-evaluated)
+    free_mb_start: int = 0
+    free_mb_last: int = 0
     current_url: str = ""
     findings: int = 0
     elements: int = 0
@@ -231,8 +258,13 @@ class Progress:
 class Scan:
     """One scan run. Thread-safe progress; cancel via stop()."""
 
-    def __init__(self, entry_url: str, cfg: ScanConfig | None = None, out_dir: Path | None = None):
+    def __init__(self, entry_url: str, cfg: ScanConfig | None = None, out_dir: Path | None = None,
+                 resume: dict | None = None):
         self.entry_url = entry_url.strip()
+        # `resume`: the scan.json of a scan that ended with unvisited links (time/page limit,
+        # stop). This run starts from those links and keeps the earlier pages and results.
+        self.resume = resume
+        self.pending: list[list] = []            # [priority, url, depth] left unvisited, for a later continue
         self.cfg = cfg or ScanConfig()
         self.out_dir = Path(out_dir) if out_dir else result_dir()
         self.progress = Progress(entry_url=self.entry_url)
@@ -247,7 +279,15 @@ class Scan:
         self._img_fetched: dict[str, tuple[bytes | None, str]] = {}   # url -> (bytes, reason), whole scan
         self._img_done: dict[str, dict] = {}                          # sha1 -> OCR result, whole scan
         self._img_seen: set[tuple[str, str]] = set()                  # (page url, location)
-        self._ocr_stats = {"ocr_sec": 0.0, "download_sec": 0.0, "cache_hits": 0, "spent_sec": 0.0, "processed": 0}
+        self._packed_evals = 0           # evaluate() calls that needed the JSON fallback
+        # 'more'/'expand' controls learned per site, place in the page and label: a control
+        # that only shows text already in the page (menu accordions: no request, no new text)
+        # on TOGGLE_PAGES different pages is not clicked again there; anything that ever
+        # loaded content keeps being clicked
+        self._toggle_pages: dict[tuple[str, str, str], set] = {}
+        self._loads_content: set[tuple[str, str, str]] = set()
+        self.expand_skipped = 0
+        self._ocr_stats = {"ocr_sec": 0.0, "download_sec": 0.0, "cache_hits": 0, "spent_sec": 0.0, "processed": 0, "repeats": 0}
         self._ocr_cov = {"pages_collected": 0, "frames_collected": 0, "img_elements": 0, "pages_not_collected": 0}
         self._ocr_lock: asyncio.Lock | None = None
 
@@ -265,6 +305,19 @@ class Scan:
         pages: list[dict] = []
         findings: list[dict] = []
         excluded: list[dict] = []
+        if self.resume:
+            prev = self.resume
+            pages, findings, excluded = list(prev["pages"]), list(prev["findings"]), list(prev.get("excluded", []))
+            self.images = list(prev.get("images", []))
+            self.extra_ads = list(prev.get("extra_ads", []))
+            self._img_seen = {(i["page_url"], i["location"]) for i in self.images}
+            if self.images:
+                self.ocr_record["ran"] = True
+            n = lambda *st: sum(1 for pg in pages if pg["status"] in st)  # noqa: E731
+            p.pages_done, p.pages_failed = n("ok", "partial"), n("failed", "stopped", "blocked")
+            p.pages_http_error, p.pages_file, p.pages_duplicate = n("http_error"), n("file"), n("duplicate")
+            p.pages_restricted, p.pages_cut = n("restricted"), n("budget_cut")
+            p.elements = sum(f.get("elements", 0) for pg in pages for f in pg.get("frames", []))
         # The final state is decided here but published only after result.json and the run
         # record are on disk: the screen treats a non-running state as "results are ready".
         state, reason = "done", ""
@@ -274,12 +327,14 @@ class Scan:
             if self.cancel.is_set():
                 state, reason = "stopped", "사용자 중단" + (f" · {limits}" if limits else "")
             else:
-                failed = [pg for pg in pages if pg["status"] not in ("ok", "duplicate")]
-                if pages and all(pg["status"] in ("failed", "blocked", "http_error") for pg in pages):
+                failed = [pg for pg in pages if pg["status"] not in ("ok", "partial", "duplicate", "file")]
+                if pages and all(pg["status"] in ("failed", "blocked", "http_error", "file", "restricted", "budget_cut")
+                                 for pg in pages):
                     state = "failed"
                     reason = "검사하지 못함 — 본문을 받지 못함(광고 없음이 아님): " + pages[0]["error"][:120]
                 else:
-                    reason = "완료" if not failed else f"완료(일부 실패 {len(failed)}건)"
+                    summ = page_summary(pages)
+                    reason = "완료" if not failed else f"완료({summ})"
                     if limits:
                         reason += f" · {limits}"
         except Exception as e:  # noqa: BLE001 - result must still be written
@@ -307,11 +362,22 @@ class Scan:
                 "elapsed_sec": doc["meta"]["elapsed_sec"], "result_path": str(path),
                 "pages": pages, "findings": findings, "excluded": excluded, "errors": p.errors,
                 "crawl": self._crawl_record(),
+                "concurrency": self._concurrency_final(),
                 "images": self.images, "ocr": self.ocr_record,
                 "extra_ads": self.extra_ads, "collection": self._collection_summary(pages),
                 "result_extra_path": str(extra_path) if extra_path else "",
                 "result": doc,
             }
+            if self.resume:
+                prev = self.resume
+                self.record["continued_from"] = prev["run_id"]
+                self.record["elapsed_total_sec"] = round(prev.get("elapsed_total_sec", prev.get("elapsed_sec", 0))
+                                                         + doc["meta"]["elapsed_sec"], 2)
+            pol = getattr(self, "policy", None)
+            if self.pending and pol is not None:
+                # enough to continue later from exactly here (see Scan(resume=...))
+                self.record["resume"] = {"pending": self.pending, "policy": pol.to_state(),
+                                         "analyzed": sorted(getattr(self, "analyzed", set()))}
             rd = runs_dir() / self.run_id
             rd.mkdir(parents=True, exist_ok=True)
             tmp = rd / "scan.json.tmp"
@@ -353,7 +419,7 @@ class Scan:
     async def _collect_images(self, frame: Frame, page_url: str, chain: list[str]) -> list[dict]:
         """<img> candidates of one frame, with a verified selector. `chain` is the iframe
         path from the page to this frame (empty for the top document)."""
-        cands = await self._ev(frame, "() => { const r = (" + IMG_JS + ")(); window.__cwNodes = Array.from(document.images); return r; }")
+        cands = await self._ev(frame, IMG_COLLECT_JS)
         if cands:
             sels = await self._ev(frame, SELECTOR_JS, [c["k"] for c in cands])
             by = {x["index"]: x for x in sels}
@@ -382,7 +448,7 @@ class Scan:
             resp = await ctx.request.get(url, headers={"Referer": referer}, timeout=lim.download_timeout_s * 1000,
                                          max_redirects=5, fail_on_status_code=False)
         except Exception as e:  # noqa: BLE001
-            msg = str(e).splitlines()[0]
+            msg = _err(e)
             return None, "내려받기 시간 초과" if "Timeout" in msg else f"내려받기 실패: {msg[:80]}"
         try:
             if resp.status >= 400:
@@ -449,28 +515,34 @@ class Scan:
             if spent > lim.total_budget_s or self._remaining() < 15:
                 item.update(status="timeout", reason=f"이미지 검사 전체 시간 한도({lim.total_budget_s:g}초) 또는 전체 검사 시간 예산 도달")
                 continue
-            if on_page >= lim.max_images:
-                item.update(status="skipped", reason=f"페이지당 이미지 수 한도({lim.max_images}개) 초과")
-                continue
-            if self._ocr_stats["processed"] >= lim.max_total_images:
-                item.update(status="skipped", reason=f"전체 이미지 수 한도({lim.max_total_images}개) 초과")
-                continue
             if not item["img_url"]:
                 item.update(status="skipped", reason="이미지 주소 없음")
                 continue
-            on_page += 1
-            self._ocr_stats["processed"] += 1
+            # The count limits are for distinct image files (download + OCR work). The same
+            # file shown again (logo, banner on every page) reuses the earlier result.
+            repeat = item["img_url"] in self._img_fetched
+            if not repeat:
+                if on_page >= lim.max_images:
+                    item.update(status="skipped", reason=f"페이지당 이미지 수 한도({lim.max_images}개) 초과")
+                    continue
+                if self._ocr_stats["processed"] >= lim.max_total_images:
+                    item.update(status="skipped", reason=f"전체 이미지 수 한도({lim.max_total_images}개) 초과")
+                    continue
+                on_page += 1
+                self._ocr_stats["processed"] += 1
+            else:
+                self._ocr_stats["repeats"] += 1
             try:
                 await asyncio.wait_for(self._ocr_one(ctx, item, img_dir), timeout=2 * lim.download_timeout_s + 30)
             except asyncio.TimeoutError:
                 item.update(status="timeout", reason="이미지 한 장 처리 시간 초과")
             except Exception as e:  # noqa: BLE001
-                item.update(status="failed", reason=f"처리 오류: {str(e).splitlines()[0][:120]}")
+                item.update(status="failed", reason=f"처리 오류: {_err(e)[:120]}")
         self._ocr_stats["spent_sec"] += time.monotonic() - t0
         st = self._ocr_stats
         self.ocr_record.update({
             "total_sec": round(st["spent_sec"], 2), "ocr_sec": round(st["ocr_sec"], 3), "download_sec": round(st["download_sec"], 3),
-            "cache_hits": st["cache_hits"], "processed": st["processed"], "coverage": dict(self._ocr_cov),
+            "cache_hits": st["cache_hits"], "processed": st["processed"], "repeats": st["repeats"], "coverage": dict(self._ocr_cov),
             "counts": {k: sum(1 for i in self.images if i["status"] == k) for k in ("ok", "skipped", "failed", "timeout", "stopped")},
             "levels": {lv: sum(1 for i in self.images if i.get("level") == lv) for lv in ("suspect", "uncertain", "none")}})
 
@@ -558,13 +630,26 @@ class Scan:
         return {
             "text": {"pages": len(pages), "ok": st("ok") + st("partial"), "duplicate": st("duplicate"),
                      "blocked": st("blocked"), "http_error": st("http_error"), "failed": st("failed"), "stopped": st("stopped"),
+                     "file": st("file"), "restricted": st("restricted"), "budget_cut": st("budget_cut"),
                      "elements": self.progress.elements},
             "images": {"enabled": bool(o.get("enabled")), "ran": bool(o.get("ran")), "error": o.get("error", ""),
                        "found": len(self.images), **{k: sum(1 for i in self.images if i["status"] == k)
-                                                    for k in ("ok", "failed", "skipped", "timeout", "stopped")}},
+                                                    for k in ("ok", "failed", "skipped", "timeout", "stopped")},
+                       # ok = download and OCR finished (text may be empty); with_text = some text read
+                       "with_text": sum(1 for i in self.images if i["status"] == "ok" and (i.get("ocr_text") or "").strip()),
+                       "files": len({i["img_url"] for i in self.images if i["img_url"]}),
+                       "skipped_by": _skip_groups(self.images)},
             "extra_ads": {"text": len(self.extra_ads),
                           "image": sum(1 for i in self.images if i.get("level") in ("suspect", "uncertain"))},
         }
+
+    def _concurrency_final(self) -> dict:
+        rec = dict(getattr(self, "concurrency_record", {}))
+        ctl = getattr(self, "_ctl", None)
+        if ctl is not None and rec.get("mode") == "자동":
+            rec.update(free_mb_last=ctl.free_last, mem_cap_last=ctl.mem_cap, limit_last=ctl.limit,
+                       throughput_ceiling=ctl.ceiling)
+        return rec
 
     def _crawl_record(self) -> dict:
         pol = getattr(self, "policy", None)
@@ -580,18 +665,45 @@ class Scan:
         self.analyzed: set[str] = set()
         async with async_playwright() as pw:
             browser = await self._launch(pw)
-            try:
-                ctx = await browser.new_context(
+
+            async def new_ctx(b):
+                c = await b.new_context(
                     viewport={"width": self.cfg.viewport[0], "height": self.cfg.viewport[1]},
                     ignore_https_errors=True, locale="ko-KR", accept_downloads=False,
                 )
                 if self.cfg.block_resources:
-                    await ctx.route("**/*", _block_heavy)
+                    await c.route("**/*", _block_heavy)
+                return c
+
+            restart_lock = asyncio.Lock()
+            restarts = 0
+
+            async def recover():
+                """A crashed browser would fail every following page: replace it once or twice."""
+                nonlocal browser, ctx, restarts
+                async with restart_lock:
+                    if browser.is_connected() or restarts >= 2 or self._remaining() < 30:
+                        return
+                    restarts += 1
+                    p.errors.append(f"브라우저 연결이 끊겨 다시 시작함({restarts}회)")
+                    browser = await self._launch(pw)
+                    ctx = await new_ctx(browser)
+
+            try:
+                ctx = await new_ctx(browser)
                 queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
                 seq = 0
-                queue.put_nowait((0.0, seq, self.entry_url, 0, False))
-                p.pages_queued = 1
-                in_flight: set[str] = set()
+                if self.resume:
+                    st = self.resume["resume"]
+                    pol.load_state(st["policy"])
+                    self.analyzed |= set(st.get("analyzed", []))
+                    for prio, url, depth in st["pending"]:
+                        seq += 1
+                        queue.put_nowait((float(prio), seq, url, int(depth), True))
+                else:
+                    queue.put_nowait((0.0, seq, self.entry_url, 0, False))
+                p.pages_queued = queue.qsize()
+                in_flight: dict[str, tuple[float, int]] = {}   # url -> (priority, depth)
                 self.visited = 0
 
                 def update_counts():
@@ -602,10 +714,29 @@ class Scan:
                     p.pages_skipped = sum(pol.skipped_n.get(r, 0) for r in self.LIMIT_REASONS)
                     p.pages_limit_excluded = p.pages_over_limit + pol.skipped_n.get("최대 페이지 수 제한", 0)
 
+                # how many pages at a time: fixed, or adjusted to the PC while scanning
+                read_free = getattr(self, "_read_free", None) or conc.free_memory_mb
+                if self.cfg.concurrency_auto:
+                    plan = conc.plan(free_mb=read_free())
+                    start, top = plan["start"], plan["cpu_cap"]       # workers up to the CPU ceiling
+                    ctl = conc.Controller(start, plan["cpu_cap"], plan["mem_cap_start"], free_last=plan["free_mb_start"])
+                else:
+                    plan, start, top = {}, max(1, self.cfg.concurrency), max(1, self.cfg.concurrency)
+                    ctl = conc.Controller(start, top)
+                limiter = conc.Limiter(start)
+                counters = {"pages": 0, "timeouts": 0}
+                self.concurrency_record = {"mode": "자동" if self.cfg.concurrency_auto else "고정", **plan,
+                                           "start": start, "max": top, "history": ctl.history}
+                self._ctl = ctl
+                p.concurrency, p.concurrency_auto, p.concurrency_cpu_cap = start, self.cfg.concurrency_auto, top
+                p.concurrency_mem_cap = plan.get("mem_cap_start", top)
+                p.free_mb_start = p.free_mb_last = plan.get("free_mb_start") or 0
+
                 async def worker():
                     nonlocal seq
                     while True:
                         item = await queue.get()
+                        held = False
                         try:
                             if item[2] is None:
                                 return
@@ -615,55 +746,149 @@ class Scan:
                                 seq += 1
                                 queue.put_nowait((prio + 150, seq, url, depth, True))
                                 continue
+                            await limiter.acquire()          # wait for a free slot
+                            held = True
                             if self.cancel.is_set():
                                 pol.note("중단으로 미방문", url)
+                                self.pending.append([prio, url, depth])
                                 continue
                             if self.visited >= self.cfg.max_pages:
                                 pol.note("최대 페이지 수 제한", url)
+                                self.pending.append([prio, url, depth])
                                 continue
                             # keep a reserve for writing results (10 s, less for short test budgets)
                             if self._remaining() < min(10.0, self.cfg.total_budget_s * 0.1):
                                 pol.note("시간 예산 도달", url)
+                                self.pending.append([prio, url, depth])
                                 continue
                             self.visited += 1
-                            in_flight.add(url)
+                            in_flight[url] = (prio, depth)
                             p.current_url = url
                             try:
                                 rec = await self._scan_page(ctx, url, depth, findings, excluded)
+                            except Exception as e:  # noqa: BLE001 - record it, keep the worker alive
+                                rec = {"requested_url": url, "url": url, "depth": depth, "status": "failed",
+                                       "error": f"내부 오류로 점검하지 못함: {type(e).__name__}: {_err(e)[:150]}",
+                                       "frames": [], "http_status": None, "expanded": [], "links": []}
+                                p.pages_failed += 1
+                                p.errors.append(traceback.format_exc(limit=4))
+                                if not browser.is_connected():
+                                    await recover()
                             finally:
-                                in_flight.discard(url)
+                                in_flight.pop(url, None)
+                                await limiter.release()
+                                held = False
+                            counters["pages"] += 1
+                            if rec.pop("_cut_by_budget", False):
+                                self.pending.append([prio, url, depth])
+                            if "시간 초과" in (rec.get("error") or ""):
+                                counters["timeouts"] += 1
                             links = rec.pop("links", [])
                             rec["links_found"] = len(links)
                             pages.append(rec)
+                            if rec["status"] == "file":
+                                # a file is not a page: it does not use up the page limit
+                                self.visited -= 1
+                                pol.note("파일 다운로드 링크", url)
                             if depth == 0 and rec["status"] != "failed":
                                 pol.allow_site_of(rec["url"])
                             candidates = rec.pop("_images", None)
-                            if self.cfg.ocr_enabled and rec["status"] != "duplicate":
-                                async with self._ocr_lock:
-                                    await self._ocr_stage(ctx, rec, candidates)
+                            if self.cfg.ocr_enabled and rec["status"] not in ("duplicate", "file", "failed"):
+                                try:
+                                    async with self._ocr_lock:
+                                        await self._ocr_stage(ctx, rec, candidates)
+                                except Exception:  # noqa: BLE001 - image results are optional
+                                    p.errors.append(traceback.format_exc(limit=4))
                             if self.cfg.follow_links and not self.cancel.is_set():
                                 for link, area, *rest in links:
-                                    d = pol.child_depth(rec["url"], link, depth, pager=bool(rest and rest[0]))
-                                    u = pol.admit(link, d)
+                                    try:
+                                        d = pol.child_depth(rec["url"], link, depth, pager=bool(rest and rest[0]))
+                                        u = pol.admit(link, d)
+                                    except ValueError:       # malformed address (e.g. "http://[...")
+                                        pol.skipped_n["주소 형식 오류"] = pol.skipped_n.get("주소 형식 오류", 0) + 1
+                                        continue
                                     if u:
                                         seq += 1
                                         queue.put_nowait((pol.priority(u, d, area), seq, u, d, False))
+                        except Exception:  # noqa: BLE001 - never let a worker die: the queue would never empty
+                            p.errors.append(traceback.format_exc(limit=4))
                         finally:
+                            if held:
+                                await limiter.release()
                             update_counts()
                             if in_flight:
                                 p.current_url = next(iter(in_flight))
                             queue.task_done()
 
-                workers = [asyncio.create_task(worker()) for _ in range(max(1, self.cfg.concurrency))]
-                await queue.join()
-                for _ in workers:
-                    queue.put_nowait((float("inf"), 0, None, 0, True))
-                await asyncio.gather(*workers)
+                workers = [asyncio.create_task(worker()) for _ in range(top)]
+                join = asyncio.create_task(queue.join())
+                stop_ctl = asyncio.Event()
+                ctl_task = None
+                if self.cfg.concurrency_auto:
+                    # always on: memory freed later can raise a cap that started low
+                    window = self.cfg.concurrency_window_s or max(15.0, min(60.0, self.cfg.total_budget_s / 10))
+                    ctl_task = asyncio.create_task(conc.run_controller(
+                        ctl, limiter, counters, stop_ctl, window, p, read_free, self.cfg.concurrency_tick_s))
+                hard = min(5.0, self.cfg.total_budget_s * 0.05)     # last seconds kept for writing results
+                cut = ""
+                while not join.done():
+                    await asyncio.wait({join}, timeout=0.5)
+                    if join.done():
+                        break
+                    if all(w.done() for w in workers):
+                        cut = "점검 작업이 모두 멈춤(내부 오류)"
+                        break
+                    if self._remaining() < hard:
+                        cut = "전체 시간 예산 도달"
+                        break
+                if cut:
+                    # do not wait for stuck work: record what is left and write the results
+                    stuck = list(in_flight.items())        # workers drop their page on cancel
+                    join.cancel()
+                    for w in workers:
+                        w.cancel()
+                    await asyncio.wait(workers, timeout=3)
+                    for url, (prio, depth) in stuck:
+                        self.pending.append([prio, url, depth])   # not finished: a continue retries it
+                        by_budget = cut == "전체 시간 예산 도달"
+                        pages.append({"requested_url": url, "url": url, "depth": depth,
+                                      "status": "budget_cut" if by_budget else "failed",
+                                      "error": ("시간 한도로 중단 — 점검을 끝내지 못함(이어서 검사 대상)" if by_budget
+                                                else f"{cut}으로 점검을 끝내지 못함"),
+                                      "frames": [], "http_status": None, "expanded": [], "links_found": 0})
+                        if by_budget:
+                            p.pages_cut += 1
+                        else:
+                            p.pages_failed += 1
+                    in_flight.clear()
+                    while not queue.empty():
+                        item = queue.get_nowait()
+                        if item[2]:
+                            pol.note("시간 예산 도달" if cut == "전체 시간 예산 도달" else "중단으로 미방문", item[2])
+                            self.pending.append([item[0], item[2], item[3]])
+                    p.errors.append(f"{cut}: 남은 작업을 기다리지 않고 결과를 저장함")
+                else:
+                    for _ in workers:
+                        queue.put_nowait((float("inf"), 0, None, 0, True))
+                    await asyncio.wait(workers, timeout=10)
+                stop_ctl.set()
+                if ctl_task:
+                    await asyncio.wait({ctl_task}, timeout=2)
+                # final counts from the policy only: links that were still waiting at the last
+                # progress update have been recorded as skipped since (no double counting)
                 p.pages_over_limit = 0
                 p.pages_queued = 0
-                await ctx.close()
+                p.pages_skipped = sum(pol.skipped_n.get(r, 0) for r in self.LIMIT_REASONS)
+                p.pages_limit_excluded = pol.skipped_n.get("최대 페이지 수 제한", 0)
+                try:
+                    await asyncio.wait_for(ctx.close(), timeout=self.cfg.close_timeout_s)
+                except Exception:  # noqa: BLE001
+                    pass
             finally:
-                await browser.close()
+                try:
+                    await asyncio.wait_for(browser.close(), timeout=self.cfg.close_timeout_s)
+                except Exception:  # noqa: BLE001
+                    pass
 
     async def _launch(self, pw) -> Browser:
         try:
@@ -679,8 +904,35 @@ class Scan:
     # -------------------------------------------------------------- page
     async def _ev(self, target, js, arg=None):
         """evaluate() with a timeout: a frame that never answers must not hang the scan."""
-        coro = target.evaluate(js) if arg is None else target.evaluate(js, arg)
-        return await asyncio.wait_for(coro, timeout=self.cfg.eval_timeout_s)
+        packed = False
+        try:
+            coro = target.evaluate(js) if arg is None else target.evaluate(js, arg)
+            r = await asyncio.wait_for(coro, timeout=self.cfg.eval_timeout_s)
+        except Exception as e:  # noqa: BLE001
+            # the argument transfer itself can fail on such pages (see below)
+            if js not in _VALUE_JS or arg is None or "is not a function" not in str(e):
+                raise
+            r, packed = None, True
+        if r is None and js in _VALUE_JS:
+            # Some pages replace window.Map with their own object. Playwright's transfer
+            # of objects between the page and Python relies on it: every object or array
+            # then arrives as None (numbers and strings still work) and passing an array
+            # argument fails. Ask again with the argument and the value packed as JSON text.
+            form = _VALUE_JS[js]
+            if form == "expr":                            # self-calling script: evaluate as is
+                wrap = f"async () => JSON.stringify(await ({js}))"
+            elif not isinstance(target, (Frame, Page)):   # element handle: element is the first argument
+                wrap = f"async (e) => JSON.stringify(await ({js})(e))"
+            else:
+                wrap = f"async (s) => JSON.stringify(await ({js})(s === null ? undefined : JSON.parse(s)))"
+            if form == "fn" and isinstance(target, (Frame, Page)):
+                coro = target.evaluate(wrap, None if arg is None else json.dumps(arg))
+            else:
+                coro = target.evaluate(wrap)
+            out = await asyncio.wait_for(coro, timeout=self.cfg.eval_timeout_s)
+            r = json.loads(out) if isinstance(out, str) else None
+            self._packed_evals += 1
+        return r
 
     async def _scan_page(self, ctx, url, depth, findings, excluded) -> dict:
         """Run one page under a time budget; stop requests interrupt it immediately."""
@@ -688,8 +940,12 @@ class Scan:
         p.current_url = url
         rec = {"requested_url": url, "url": url, "depth": depth, "status": "ok", "error": "", "frames": [],
                "http_status": None, "expanded": [], "links": []}
-        page: Page = await ctx.new_page()
-        page.on("dialog", lambda d: asyncio.ensure_future(d.dismiss()))
+        page: Page = await asyncio.wait_for(ctx.new_page(), timeout=self.cfg.eval_timeout_s)
+
+        def on_dialog(d):
+            rec.setdefault("dialogs", []).append(" ".join(d.message.split())[:120])
+            asyncio.ensure_future(d.dismiss())
+        page.on("dialog", on_dialog)
         page.on("popup", lambda pp: asyncio.ensure_future(pp.close()))
         work = asyncio.create_task(self._page_work(page, url, rec, findings, excluded))
         loop = asyncio.get_running_loop()
@@ -712,16 +968,33 @@ class Scan:
             except asyncio.CancelledError:
                 pass
             except Exception as e:  # noqa: BLE001
-                rec["status"], rec["error"] = "failed", str(e).splitlines()[0]
+                rec["status"], rec["error"] = "failed", _err(e)
             if interrupted == "stopped":
                 rec["status"], rec["error"] = "stopped", "사용자 중단으로 점검을 끝내지 못함"
             elif interrupted == "timeout":
                 rec["status"] = "failed"
-                rec["error"] = f"페이지 처리 시간 초과({budget:.0f}초) — 일부만 점검됨"
+                if budget < self.cfg.page_budget_s:
+                    # the page time was shortened to what was left of the whole scan budget:
+                    # the scan ran out of time, the page did not fail
+                    rec["status"] = "budget_cut"
+                    rec["error"] = f"시간 한도로 중단 — 전체 시간 예산이 거의 끝나 {budget:.0f}초만 점검함(이어서 검사 대상)"
+                    rec["_cut_by_budget"] = True
+                else:
+                    rec["error"] = f"페이지 처리 시간 초과({budget:.0f}초) — 일부만 점검됨"
             rec["elapsed_sec"] = round(loop.time() - t_start, 2)
-            if rec["status"] in ("failed", "stopped", "http_error", "blocked"):
+            if rec["status"] in ("failed", "stopped", "blocked"):
                 p.pages_failed += 1
-            elif rec["status"] != "duplicate":
+            elif rec["status"] == "http_error":
+                p.pages_http_error += 1
+            elif rec["status"] == "file":
+                p.pages_file += 1
+            elif rec["status"] == "restricted":
+                p.pages_restricted += 1
+            elif rec["status"] == "budget_cut":
+                p.pages_cut += 1
+            elif rec["status"] == "duplicate":
+                p.pages_duplicate += 1
+            else:
                 p.pages_done += 1
         finally:
             try:
@@ -742,8 +1015,15 @@ class Scan:
         try:
             resp = await page.goto(url, wait_until="domcontentloaded", timeout=self.cfg.nav_timeout_ms)
         except Exception as e:
+            msg = _err(e)
+            if "Download is starting" in msg:
+                # an attachment link without a file extension (readFile.do?fileId=...):
+                # the server sent a file, not a web page. Nothing to check, not a failure.
+                rec["status"], rec["error"] = "file", "파일 내려받기 링크(웹 페이지가 아님)"
+                lap("load")
+                return
             # partial load is still worth analysing if the DOM exists
-            rec["error"] = f"로딩 지연/실패: {str(e).splitlines()[0]}"
+            rec["error"] = f"로딩 지연/실패: {msg}"
             resp = None
         if resp is not None:
             rec["http_status"] = resp.status
@@ -753,6 +1033,16 @@ class Scan:
         if page.url.startswith(("chrome-error:", "about:blank")):
             # nothing was loaded: this is a collection failure, never "no ads"
             rec["status"] = "failed"
+            if not rec["error"]:
+                said = rec.get("dialogs") or []
+                if said and page.url.startswith("about:blank"):
+                    # the site refused an anonymous visitor (login required, no permission,
+                    # secret post ...): not a collection failure of ours, recorded apart
+                    rec["status"] = "restricted"
+                    rec["error"] = f"접근 제한 — 사이트 알림창 뒤 빈 화면으로 바뀜: “{said[-1]}”"
+                else:
+                    rec["error"] = ("빈 화면(about:blank)으로 바뀜 — 사유 미기록" if page.url.startswith("about:blank")
+                                    else "브라우저 오류 화면으로 바뀜 — 사유 미기록")
             return
         await self._settle(page)
         lap("settle")
@@ -762,6 +1052,12 @@ class Scan:
             return
         final = urldefrag(page.url)[0]
         rec["url"] = final
+        if compare_key(final) != compare_key(url) and account_page(final) and not account_page(url):
+            # the site sent an anonymous visitor to its login/account page
+            rec["status"] = "restricted"
+            said = rec.get("dialogs") or []
+            rec["error"] = "접근 제한 — 로그인 페이지로 이동됨" + (f": “{said[-1]}”" if said else "")
+            return
         key = compare_key(final)
         if key in self.analyzed:
             # redirected to a page that was already analysed: do not report it twice
@@ -816,6 +1112,8 @@ class Scan:
         except Exception:  # noqa: BLE001
             await page.wait_for_timeout(self.cfg.settle_ms)
 
+    TOGGLE_PAGES = 2
+
     async def _expand(self, page: Page, rec: dict):
         """Scroll for lazy content, then click safe 'load more' controls (main document)."""
         try:
@@ -823,6 +1121,28 @@ class Scan:
         except Exception:  # noqa: BLE001
             pass
         start = urldefrag(page.url)[0]
+        site = urlsplit(start).netloc.lower()
+        requests = [0]
+
+        def on_request(req):
+            # only requests that can bring content count; blocked images (from the scroll),
+            # beacons and ad/analytics calls happen in the background and say nothing
+            # about the control just clicked
+            if req.resource_type in CONTENT_REQUESTS and not _blocked_host(req.url):
+                requests[0] += 1
+        page.on("request", on_request)
+        try:
+            await self._click_more(page, rec, start, site, requests)
+        finally:
+            page.remove_listener("request", on_request)
+
+    async def _text_size(self, page: Page) -> int:
+        try:
+            return int(await self._ev(page.main_frame, TEXT_SIZE_JS) or 0)
+        except Exception:  # noqa: BLE001
+            return -1
+
+    async def _click_more(self, page: Page, rec: dict, start: str, site: str, requests: list):
         clicks = 0
         for _ in range(4):                       # new "more" buttons may appear after a click
             if clicks >= self.cfg.expand_clicks or self.cancel.is_set():
@@ -833,21 +1153,39 @@ class Scan:
                 break
             if not labels:
                 break
-            for k, label in enumerate(labels):
+            clicked_now = 0
+            for k, (label, place) in enumerate(labels):
                 if clicks >= self.cfg.expand_clicks:
                     break
+                key = (site, place, label)
+                if key not in self._loads_content and len(self._toggle_pages.get(key, ())) >= self.TOGGLE_PAGES:
+                    if label not in rec.get("expand_skipped", []):
+                        self.expand_skipped += 1
+                        rec.setdefault("expand_skipped", []).append(label)
+                    continue
+                before_req, before_text = requests[0], await self._text_size(page)
                 try:
                     h = await page.main_frame.evaluate_handle(
                         "k => { const e = window.__cwExpand[k]; window.__cwClicked.add(e); return e; }", k)
                     await h.as_element().click(timeout=2000, no_wait_after=True)
                     clicks += 1
+                    clicked_now += 1
                     rec["expanded"].append(label)
                 except Exception:  # noqa: BLE001
                     continue
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=800)
-                except Exception:  # noqa: BLE001
-                    pass
+                await asyncio.sleep(0.15)
+                if requests[0] > before_req:
+                    # the control asked the server for something: wait for it, as before
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=800)
+                    except Exception:  # noqa: BLE001
+                        pass
+                if urldefrag(page.url)[0] == start:
+                    after_text = await self._text_size(page)
+                    if requests[0] > before_req or (before_text >= 0 and after_text > before_text):
+                        self._loads_content.add(key)
+                    elif before_text >= 0:
+                        self._toggle_pages.setdefault(key, set()).add(start)
                 if urldefrag(page.url)[0] != start:
                     # the control navigated away: keep the target as a link, reload the page
                     rec["links"].append((page.url, "main", False))
@@ -855,6 +1193,8 @@ class Scan:
                     await page.goto(start, wait_until="domcontentloaded", timeout=self.cfg.nav_timeout_ms)
                     await self._settle(page)
                     return
+            if not clicked_now:
+                break          # only known toggles left: another round would find the same ones
             await self._quiet(page)
 
     async def _walk(self, frame: Frame, chain: list[str], page_url: str, rec, findings, excluded, depth):
@@ -891,7 +1231,7 @@ class Scan:
                     findings.append({
                         "url": page_url, "location": loc, "technique": c.technique,
                         "evidence_text": c.evidence, "restored_text": c.restored,
-                        "ad_reasons": c.ad_reasons, "technique_reasons": c.tech_reasons,
+                        "ad_reasons": c.ad_reasons, "ad_matches": c.ad_matches, "technique_reasons": c.tech_reasons,
                         "changes": c.changes, "selector_verified": bool(s.get("verified")),
                         "frame_url": frame.url, "frame_chain": list(chain),
                         "unit_key": f"{page_url}|{' >>> '.join(chain)}|{c.unit}",
@@ -914,7 +1254,7 @@ class Scan:
                     known.add((page_url, loc))
                     self.extra_ads.append({"kind": "text", "url": page_url, "location": loc,
                                            "evidence_text": x["evidence"], "restored_text": x["restored"],
-                                           "ad_reasons": x["ad_reasons"], "excluded_why": x["excluded_why"],
+                                           "ad_reasons": x["ad_reasons"], "ad_matches": x.get("ad_matches", []), "excluded_why": x["excluded_why"],
                                            "selector_verified": bool(sel.get("verified")), "frame_chain": list(chain)})
             if self.cfg.ocr_enabled:
                 try:
@@ -922,13 +1262,14 @@ class Scan:
                     finfo["imgs"] = len(imgs)
                     rec.setdefault("_images", []).extend(imgs)
                 except Exception as e:  # noqa: BLE001 - OCR must never cost the text results
-                    finfo["image_collect_error"] = str(e).splitlines()[0]
+                    finfo["image_collect_error"] = _err(e)
             p.frames_done += 1
             p.findings = len({(f["url"], f["location"], f["technique"]) for f in findings})
         except Exception as e:  # noqa: BLE001
-            finfo["status"], finfo["error"] = "failed", str(e).splitlines()[0]
+            # this frame could not be read, but the frames inside it are separate documents:
+            # still check them
+            finfo["status"], finfo["error"] = "failed", _err(e)
             p.frames_failed += 1
-            return
         if depth >= self.cfg.max_frame_depth:
             return
         for child in frame.child_frames:
@@ -942,11 +1283,130 @@ class Scan:
                     info["selector"] = sels[0]["selector"]
                     info["verified"] = sels[0]["verified"]
             except Exception as e:  # noqa: BLE001
-                rec["frames"].append({"chain": list(chain), "frame_url": child.url, "status": "failed",
-                                      "error": f"iframe 위치 확인 실패: {str(e).splitlines()[0]}"})
-                p.frames_failed += 1
+                msg = _err(e)
+                if child.is_detached() or "detached" in msg.lower():
+                    # the page removed this frame (often an empty helper frame) while it was
+                    # being checked: there is no content left to check, which is not a failure
+                    rec["frames"].append({"chain": list(chain), "frame_url": child.url, "status": "detached",
+                                          "error": "점검 중 페이지가 프레임을 제거함(남은 내용 없음)"})
+                    p.frames_detached += 1
+                else:
+                    rec["frames"].append({"chain": list(chain), "frame_url": child.url, "status": "failed",
+                                          "error": f"iframe 위치 확인 실패: {msg}"})
+                    p.frames_failed += 1
                 continue
             await self._walk(child, chain + [info["selector"]], page_url, rec, findings, excluded, depth + 1)
+
+
+IMG_COLLECT_JS = "() => { const r = (" + IMG_JS + ")(); window.__cwNodes = Array.from(document.images); return r; }"
+
+def account_page(url: str) -> bool:
+    """Login / account pages (same words the crawler skips in links)."""
+    from .crawl import ACCOUNT_TOKEN, low_value_reason
+    return low_value_reason(url) in ACCOUNT_TOKEN
+
+
+def fail_kind(pg: dict) -> str:
+    """Why a page could not be checked, in a few fixed words (from the recorded error)."""
+    st, e = pg.get("status"), pg.get("error") or ""
+    if st == "blocked":
+        return "보안 확인 차단"
+    if st == "stopped":
+        return "사용자 중단"
+    if "ERR_NAME_NOT_RESOLVED" in e:
+        return "주소 이름 해석 실패(DNS)"
+    if st == "budget_cut" or is_budget_cut(pg):
+        return "시간 한도로 중단"
+    if st == "restricted" or "알림창" in e:
+        return "접근 제한(로그인·권한 필요 등)"
+    if "전체 시간 예산" in e:
+        return "전체 시간 예산 도달"
+    if "처리 시간 초과" in e:
+        return "페이지 처리 시간 초과"
+    if "Timeout" in e and "로딩" in e:
+        return "로딩 제한 시간 초과"
+    if "내부 오류" in e:
+        return "프로그램 내부 오류"
+    if "ERR_" in e:
+        return "접속 오류"
+    if not e or "사유 미기록" in e:
+        return "사유 미기록"
+    return "기타"
+
+
+def page_summary(pages: list[dict]) -> str:
+    """'불러오지 못함 11건(로딩 제한 시간 초과 6, ...), HTTP 응답 오류 14건(400: 13, 500: 1), 일부만 로딩 3건'.
+    The same counting as the screen: failed/blocked/stopped pages are 'not loaded'; http_error
+    pages are answered with an error status; partial pages were checked after a slow load."""
+    from collections import Counter
+    restricted = [pg for pg in pages if is_restricted(pg)]
+    cut = [pg for pg in pages if is_budget_cut(pg)]
+    bad = [pg for pg in pages if pg.get("status") in ("failed", "blocked", "stopped")
+           and not is_restricted(pg) and not is_budget_cut(pg)]
+    http = [pg for pg in pages if pg.get("status") == "http_error"]
+    part = sum(1 for pg in pages if pg.get("status") == "partial")
+    out = []
+    if bad:
+        kinds = Counter(fail_kind(pg) for pg in bad)
+        out.append(f"불러오지 못함 {len(bad)}건(" + ", ".join(f"{k} {n}" for k, n in kinds.most_common()) + ")")
+    if http:
+        codes = Counter(pg.get("http_status") for pg in http)
+        out.append(f"HTTP 응답 오류 {len(http)}건(" + ", ".join(f"{c}: {n}" for c, n in sorted(codes.items(), key=lambda x: str(x[0]))) + ")")
+    if restricted:
+        out.append(f"접근 제한 {len(restricted)}건(로그인·권한 필요 등)")
+    if cut:
+        out.append(f"시간 한도로 중단 {len(cut)}건(이어서 검사 대상)")
+    if part:
+        out.append(f"일부만 로딩 {part}건(점검함)")
+    return ", ".join(out)
+
+
+def is_budget_cut(pg: dict) -> bool:
+    """Cut because the whole time budget ran out. Records before 0.1.9 kept these as 'failed'."""
+    e = pg.get("error") or ""
+    return pg.get("status") == "budget_cut" or (pg.get("status") == "failed" and
+                                                ("전체 시간 예산이 거의 끝나" in e or "전체 시간 예산 도달으로" in e))
+
+
+def is_restricted(pg: dict) -> bool:
+    """Access refused by the site (alert, then blank). Records before 0.1.8 kept these as
+    'failed' with the alert in the error text."""
+    return pg.get("status") == "restricted" or (pg.get("status") == "failed" and "알림창" in (pg.get("error") or ""))
+
+
+def _err(e: BaseException) -> str:
+    """First line of an error message. Some errors have none (a timeout's message is empty):
+    taking line [0] of an empty message raised a second error inside the handler and turned
+    a failed frame into a failed page."""
+    lines = str(e).strip().splitlines()
+    if lines:
+        return lines[0]
+    if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
+        return "시간 초과(응답 없음)"
+    return type(e).__name__
+
+
+def _skip_groups(images: list[dict]) -> dict[str, int]:
+    """Why images were not read, grouped for the screen (reasons are kept per image)."""
+    out: dict[str, int] = {}
+    for i in images:
+        if i["status"] not in ("skipped", "timeout"):
+            continue
+        r = i.get("reason", "")
+        g = ("전체 개수 한도" if r.startswith("전체 이미지 수 한도") else
+             "페이지당 개수 한도" if r.startswith("페이지당 이미지 수 한도") else
+             "시간 한도" if i["status"] == "timeout" else
+             "아이콘 크기" if r.startswith("아이콘 크기") else
+             "지원하지 않는 형식" if r.startswith(("SVG", "지원하지")) else
+             "파일 크기 한도" if r.startswith("파일 크기") else "기타")
+        out[g] = out.get(g, 0) + 1
+    return out
+
+
+# Scripts that always return an object/array (not None), with their form: "fn" is a
+# function taking the evaluate argument, "expr" a self-calling expression.
+_VALUE_JS = {COLLECT_JS: "expr", SELECTOR_JS: "fn", IFRAME_SEL_JS: "fn", LINKS_JS: "fn", EXPAND_JS: "fn",
+             IMG_JS: "fn", IMG_COLLECT_JS: "fn", CHALLENGE_JS: "fn"}
 
 
 # Ad-tech and analytics networks: their requests never carry page content we inspect,
@@ -963,6 +1423,8 @@ BLOCK_HOSTS = (
     "cauly.co.kr", "acecounter.com", "logger.co.kr", "beusable.net",
 )
 BLOCK_TYPES = ("image", "media", "font", "ping", "beacon")
+# request types that can carry page content loaded by a "more" control
+CONTENT_REQUESTS = ("xhr", "fetch", "script", "document")
 
 
 def _blocked_host(url: str) -> bool:

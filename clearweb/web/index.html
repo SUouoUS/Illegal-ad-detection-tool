@@ -38,8 +38,9 @@
       <div class="opts-row">
         <label>링크를 따라가는 횟수 <input type="number" id="opt-depth" min="0" max="10" step="1"></label>
         <label>최대 페이지 수 <input type="number" id="opt-pages" min="1" max="2000" step="1"></label>
-        <label>전체 시간 한도(분) <input type="number" id="opt-budget" min="1" max="29" step="1"></label>
-        <span class="opts-hint">0이면 입력한 페이지만 검사합니다. 목록의 다음 쪽으로 넘어가는 것은 횟수에 넣지 않습니다.</span>
+        <label>전체 시간 한도(분) <input type="number" id="opt-budget" min="1" max="180" step="1"></label>
+        <label>동시 처리 <select id="opt-conc"><option value="auto">자동(권장)</option><option value="2">2</option><option value="4">4</option><option value="6">6</option><option value="8">8</option></select></label>
+        <span class="opts-hint">0이면 입력한 페이지만 검사합니다. 목록의 다음 쪽으로 넘어가는 것은 횟수에 넣지 않습니다. 공모전 평가의 처리 시간 한도는 30분입니다.</span>
         <label class="opt-check"><input type="checkbox" id="opt-ocr"> 이미지 속 글자 검사 — 방문한 페이지의 이미지(img), 검사 시간 증가</label>
         <span class="opts-hint" id="ocr-status"></span>
       </div>
@@ -52,6 +53,7 @@
     <span class="state" id="st-state" data-state="idle">미검사</span>
     <span class="status-text" id="st-summary"></span>
     <span class="alert" id="st-alert" hidden></span>
+    <button type="button" class="btn small" id="btn-resume" hidden>이어서 검사</button>
     <button type="button" class="link-btn" id="st-toggle" aria-expanded="false" aria-controls="st-detail" hidden>검사 상세</button>
   </div>
   <div class="status-detail" id="st-detail" hidden>
@@ -59,8 +61,10 @@
       <dt>진행 중 주소</dt><dd id="sd-current">-</dd>
       <dt>페이지</dt><dd id="sd-pages">-</dd>
       <dt>프레임</dt><dd id="sd-frames">-</dd>
+      <dt>동시 처리</dt><dd id="sd-conc">-</dd>
       <dt>종료 사유</dt><dd id="sd-reason">-</dd>
       <dt>건너뛴 링크</dt><dd id="sd-skipped">-</dd>
+      <dt>검사한 범위</dt><dd id="sd-progress">-</dd>
       <dt>텍스트 수집</dt><dd id="sd-text">-</dd>
       <dt>이미지·OCR</dt><dd id="sd-img">-</dd>
       <dt>결과 파일</dt><dd id="sd-result">-</dd>
@@ -134,6 +138,7 @@
         <summary>기술 상세</summary>
         <dl class="kv">
           <dt>광고 판단 근거</dt><dd><ul class="plain" id="t-ad"></ul></dd>
+          <dt id="t-match-label">일치한 문자열</dt><dd id="t-match-wrap"><ul class="plain" id="t-match"></ul></dd>
           <dt>은닉·위장 근거</dt><dd><ul class="plain" id="t-hide"></ul></dd>
           <dt id="t-changes-label">글자 변환</dt><dd id="t-changes"></dd>
           <dt>요소 선택자</dt><dd><code id="t-loc"></code></dd>

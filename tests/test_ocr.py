@@ -129,3 +129,24 @@ def test_stop_and_unloaded_pages_are_recorded_not_hidden(monkeypatch, tmp_path):
     sc.cancel.set()
     asyncio.run(sc._ocr_stage(None, {"url": "http://x/", "depth": 0}, [_cand("http://x/", "img.a")]))
     assert sc.images[0]["status"] == "stopped"
+
+
+def test_count_limits_apply_to_distinct_image_files(monkeypatch, tmp_path):
+    """The same logo on every page reuses its first result and does not use up the limit."""
+    sc = _scan_with_fake_ocr(monkeypatch, tmp_path, max_images=2, max_total_images=2)
+
+    async def fake_one(ctx, item, img_dir):
+        sc._img_fetched[item["img_url"]] = (b"x", "")
+        item.update(level="none", ocr_text="", verdict={"level": "none"})
+
+    monkeypatch.setattr(sc, "_ocr_one", fake_one)
+    logo = lambda page: dict(_cand(page, "img.logo"), url="http://x/img/logo.png")
+    for k in range(4):
+        page = f"http://x/p{k}"
+        asyncio.run(sc._ocr_stage(None, {"url": page, "depth": 1}, [logo(page), _cand(page, f"img.n{k}")]))
+    st = [(i["page_url"][-2:], i["selector"], i["status"]) for i in sc.images]
+    assert st[:4] == [("p0", "img.logo", "ok"), ("p0", "img.n0", "ok"), ("p1", "img.logo", "ok"), ("p1", "img.n1", "skipped")]
+    assert all(s == "ok" for _, sel, s in st if sel == "img.logo")
+    assert sc.ocr_record["processed"] == 2 and sc.ocr_record["repeats"] == 3
+    from clearweb.scanner import _skip_groups
+    assert _skip_groups(sc.images) == {"전체 개수 한도": 3}

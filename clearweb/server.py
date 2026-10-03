@@ -53,7 +53,19 @@ def info():
 @app.post("/api/scans")
 async def start(request: Request):
     body = await request.json()
-    url = str(body.get("url", "")).strip()
+    prev = None
+    if body.get("resume"):
+        # continue a scan that ended with unvisited links, from where it stopped
+        rid = str(body["resume"])
+        f = runs_dir() / rid / "scan.json"
+        if not rid.replace("-", "").isdigit() or not f.is_file():
+            raise HTTPException(404, "이어서 검사할 기록이 없습니다.")
+        prev = json.loads(f.read_text(encoding="utf-8"))
+        if not (prev.get("resume") or {}).get("pending"):
+            raise HTTPException(400, "이 검사에는 남은 링크가 없습니다.")
+        url = prev["entry_url"]
+    else:
+        url = str(body.get("url", "")).strip()
     s = urlsplit(url)
     if s.scheme not in ("http", "https") or not s.netloc:
         raise HTTPException(400, "http:// 또는 https:// 로 시작하는 주소를 입력하세요.")
@@ -61,7 +73,7 @@ async def start(request: Request):
         sc = _current["scan"]
         if sc is not None and sc.progress.state == "running":
             raise HTTPException(409, "이미 검사가 진행 중입니다.")
-        sc = Scan(url, _config(body))
+        sc = Scan(url, _config(body), resume=prev)
         th = threading.Thread(target=_run, args=(sc,), daemon=True)
         _current.update(scan=sc, thread=th)
         th.start()
@@ -84,9 +96,13 @@ def _config(body: dict) -> ScanConfig:
         cfg.max_depth = v
     if (v := num("max_pages", 1, 2000)) is not None:
         cfg.max_pages = v
-    if (v := num("budget_min", 1, 29, float)) is not None:
+    # the contest measures up to 30 minutes; longer limits are for practical use
+    if (v := num("budget_min", 1, 180, float)) is not None:
         cfg.total_budget_s = v * 60
     cfg.ocr_enabled = bool(opts.get("ocr"))
+    # pages at a time: "auto" (default) or a fixed number
+    if (v := num("concurrency", 1, 16)) is not None:
+        cfg.concurrency, cfg.concurrency_auto = v, False
     return cfg
 
 
@@ -94,7 +110,9 @@ def _config(body: dict) -> ScanConfig:
 def defaults():
     c = ScanConfig()
     ok, msg = ocr.engine_status()
+    from . import concurrency as conc
     return {"max_depth": c.max_depth, "max_pages": c.max_pages, "budget_min": round(c.total_budget_s / 60, 1),
+            "concurrency_plan": conc.plan(free_mb=conc.free_memory_mb()),
             "ocr": c.ocr_enabled, "ocr_available": ok, "ocr_message": msg}
 
 
@@ -160,7 +178,11 @@ def get_run(run_id: str):
     f = runs_dir() / run_id / "scan.json"
     if not f.is_file():
         raise HTTPException(404, "검사 기록이 없습니다.")
-    return JSONResponse(json.loads(f.read_text(encoding="utf-8")))
+    rec = json.loads(f.read_text(encoding="utf-8"))
+    # failure summary recomputed with the current categories (also for older records)
+    from .scanner import page_summary
+    rec["page_summary"] = page_summary(rec.get("pages", []))
+    return JSONResponse(rec)
 
 
 def _free_port(start: int, tries: int = 20) -> int:
