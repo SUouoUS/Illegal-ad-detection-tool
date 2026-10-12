@@ -13,12 +13,12 @@ from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import VERSION
 from .paths import resource_dir, result_dir, runs_dir
-from . import ocr
+from . import manage, ocr
 from .scanner import Scan, ScanConfig
 
 mimetypes.add_type("font/woff2", ".woff2")
@@ -164,11 +164,61 @@ def list_runs():
         if f.is_file():
             try:
                 r = json.loads(f.read_text(encoding="utf-8"))
-                out.append({k: r.get(k) for k in ("run_id", "entry_url", "state", "end_reason", "started_at", "elapsed_sec")}
-                           | {"findings": len(r.get("result", {}).get("findings", []))})
+                rv = manage.load_reviews(d)
+                out.append({k: r.get(k) for k in ("run_id", "entry_url", "state", "end_reason", "started_at", "elapsed_sec",
+                                                  "tool_version")}
+                           | {"findings": len(r.get("result", {}).get("findings", [])),
+                              "items": len(manage.rows(r, rv)),
+                              "reviewed": sum(1 for v in rv.values() if v.get("status") != "unreviewed")})
             except (OSError, ValueError):
                 continue
     return out
+
+
+def _run_dir(run_id: str) -> Path:
+    if not re.fullmatch(r"\d{8}-\d{6}", run_id):
+        raise HTTPException(404)
+    d = runs_dir() / run_id
+    if not (d / "scan.json").is_file():
+        raise HTTPException(404, "검사 기록이 없습니다.")
+    return d
+
+
+def _record(d: Path) -> dict:
+    return json.loads((d / "scan.json").read_text(encoding="utf-8"))
+
+
+@app.put("/api/scans/{run_id}/reviews")
+async def put_review(run_id: str, request: Request):
+    """The inspector's decision on one item. Kept apart: result files are never changed."""
+    d = _run_dir(run_id)
+    body = await request.json()
+    try:
+        reviews = manage.save_review(d, str(body.get("key", ""))[:4000], str(body.get("status", "")),
+                                     str(body.get("memo", "")))
+    except ValueError:
+        raise HTTPException(400, "검토 상태가 올바르지 않습니다.")
+    return reviews
+
+
+@app.get("/api/scans/{run_id}/export.csv")
+def export_csv(run_id: str):
+    d = _run_dir(run_id)
+    rec = _record(d)
+    prev = manage.find_previous(runs_dir(), rec)
+    return Response(manage.to_csv(rec, manage.load_reviews(d), manage.compare(rec, prev) if prev else None),
+                    media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="clearweb-{run_id}.csv"'})
+
+
+@app.get("/api/scans/{run_id}/report")
+def report(run_id: str):
+    from .scanner import page_summary
+    d = _run_dir(run_id)
+    rec = _record(d)
+    prev = manage.find_previous(runs_dir(), rec)
+    return HTMLResponse(manage.report_html(rec, manage.load_reviews(d), page_summary(rec.get("pages", [])),
+                                           manage.compare(rec, prev) if prev else None))
 
 
 @app.get("/api/scans/{run_id}")
@@ -179,6 +229,9 @@ def get_run(run_id: str):
     if not f.is_file():
         raise HTTPException(404, "검사 기록이 없습니다.")
     rec = json.loads(f.read_text(encoding="utf-8"))
+    rec["reviews"] = manage.load_reviews(f.parent)
+    prev = manage.find_previous(runs_dir(), rec)
+    rec["compare"] = manage.compare(rec, prev) if prev else None
     # failure summary recomputed with the current categories (also for older records)
     from .scanner import page_summary
     rec["page_summary"] = page_summary(rec.get("pages", []))

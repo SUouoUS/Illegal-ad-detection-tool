@@ -23,7 +23,7 @@ from playwright.async_api import Browser, Frame, Page, async_playwright
 from . import VERSION, ocr, result_writer
 from . import concurrency as conc
 from .crawl import Policy
-from .detect import analyze_frame, judge_image
+from .detect import analyze_frame, judge_attr, judge_image, judge_link
 from .urlnorm import compare_key
 from .paths import resource_dir, result_dir, runs_dir, setup_browser_env
 
@@ -348,13 +348,9 @@ class Scan:
             path = result_writer.write(doc, self.out_dir / "result.json")
             extra_path = None
             extra_file = self.out_dir / "result_extra.json"
-            if self.ocr_record.get("ran"):
-                extra = result_writer.build_extra(self.entry_url, started, finished, self._extra_findings(), elapsed)
-                extra_path = result_writer.write_extra(extra, extra_file)
-            elif extra_file.exists():
-                # a result_extra.json left by an earlier scan must not look like this scan's result
-                extra_file.unlink()
-                self.ocr_record["removed_stale_extra"] = str(extra_file)
+            # always written (also with no rows), so a file from an earlier scan never remains
+            extra = result_writer.build_extra(self.entry_url, started, finished, self._extra_findings(), elapsed)
+            extra_path = result_writer.write_extra(extra, extra_file)
             self.record = {
                 "tool_version": VERSION, "run_id": self.run_id, "entry_url": self.entry_url,
                 "state": state, "end_reason": reason,
@@ -611,16 +607,63 @@ class Scan:
                 res = res2
         item.update({k: v for k, v in res.items() if k in self.RESULT_KEYS or k == "cache_hit"})
 
+    VISIBLE_AD = "VISIBLE_AD(숨김 없이 노출된 불법광고 의심 문구)"
+    SEO_SPAM = "SEO_SPAM(화면에 보이지 않는 검색엔진·속성용 광고 문구)"
+    HIDDEN_LINK = "HIDDEN_LINK(숨겨진 불법광고 사이트 링크)"
+
+    async def _hidden_extras(self, frame, page_url: str, chain: list[str]):
+        """SEO_SPAM and HIDDEN_LINK candidates of one frame (judged with the same ad rules)."""
+        items = await self._ev(frame, HIDDEN_EXTRA_JS) or []
+        hits = []
+        for it in items:
+            if it["kind"] == "link":
+                v = judge_link(it.get("text", "") + " " + it.get("title", ""), it["value"])
+                if v:
+                    hits.append((it, "link", v, f"링크 주소: {it['value'][:300]}" + (f" · 링크 글자: {it['text'][:100]}" if it.get("text") else "")
+                                 + f" · {it['why']}"))
+            else:
+                v = judge_attr(it["value"])
+                if v:
+                    hits.append((it, "seo", v, f"{it['attr']}: {it['value']}"))
+        if not hits:
+            return
+        sels = await self._ev(frame, SELECTOR_JS, [it["k"] for it, *_ in hits])
+        by = {s["index"]: s for s in sels}
+        known = {(e["url"], e["location"], e["kind"]) for e in self.extra_ads}
+        for it, kind, v, evidence in hits:
+            sel = by.get(it["k"], {})
+            if not sel.get("selector"):
+                continue
+            loc = " >>> ".join(chain + [sel["selector"]])
+            if (page_url, loc, kind) in known:
+                continue
+            known.add((page_url, loc, kind))
+            self.extra_ads.append({"kind": kind, "url": page_url, "location": loc, "evidence_text": evidence,
+                                   "restored_text": "", "ad_reasons": list(v.reasons), "attr": it["attr"],
+                                   "excluded_why": ("링크 글자가 없거나 숨겨져 있어 공식 4종 기법(문구 은닉)에 해당하지 않음" if kind == "link"
+                                                    else "페이지 본문이 아닌 속성·메타 정보의 문구라 공식 결과(result.json)에서 제외"),
+                                   "selector_verified": bool(sel.get("verified")), "frame_chain": list(chain)})
+    IMAGE_AD = "IMAGE_TEXT_AD(이미지 속 광고 의심 문구)"
+
     def _extra_findings(self) -> list[dict]:
-        """result_extra.json rows: only images whose own text block meets the ad rules."""
+        """result_extra.json rows (types beyond the four official techniques):
+        - VISIBLE_AD: text that meets the ad rules but is shown openly (no concealment)
+        - IMAGE_TEXT_AD: images whose own text block meets the ad rules (image check on)"""
         out = []
+        label = {"text": self.VISIBLE_AD, "seo": self.SEO_SPAM, "link": self.HIDDEN_LINK}
+        for x in self.extra_ads:
+            kind = x.get("kind", "text")
+            if kind not in label or not x.get("location") or not x.get("selector_verified", True):
+                continue
+            out.append({"url": x["url"], "location": x["location"], "evidence_text": x["evidence_text"],
+                        "extra_finding": label[kind]})
         for im in self.images:
             if im.get("level") != "suspect" or not im.get("selector"):
                 continue
             b = im["ocr_blocks"][im["verdict"]["block"]]["text"] if im["verdict"].get("block") is not None else im.get("ocr_text", "")
             out.append({"url": im["page_url"], "location": im.get("location") or im["selector"],
                         "evidence_text": f"OCR 추출문: {b} (이미지: {im['img_url'][:300]})",
-                        "extra_finding": "IMAGE_TEXT_AD(이미지 속 광고 의심 문구)"})
+                        "extra_finding": self.IMAGE_AD})
         return out
 
     def _collection_summary(self, pages: list[dict]) -> dict:
@@ -1256,6 +1299,10 @@ class Scan:
                                            "evidence_text": x["evidence"], "restored_text": x["restored"],
                                            "ad_reasons": x["ad_reasons"], "ad_matches": x.get("ad_matches", []), "excluded_why": x["excluded_why"],
                                            "selector_verified": bool(sel.get("verified")), "frame_chain": list(chain)})
+            try:
+                await self._hidden_extras(frame, page_url, chain)
+            except Exception as e:  # noqa: BLE001 - extra types must never cost the official results
+                finfo["extra_collect_error"] = _err(e)
             if self.cfg.ocr_enabled:
                 try:
                     imgs = await self._collect_images(frame, page_url, chain)
@@ -1299,6 +1346,57 @@ class Scan:
 
 
 IMG_COLLECT_JS = "() => { const r = (" + IMG_JS + ")(); window.__cwNodes = Array.from(document.images); return r; }"
+
+# Text that is not shown on the page but read by search engines or screen readers
+# (title, meta description/keywords/og, alt, title=, aria-label), and links to other sites whose
+# words are empty or hidden. Elements are kept in window.__cwNodes for selector building.
+HIDDEN_EXTRA_JS = """() => {
+  const nodes = [], items = [];
+  const flat = (x) => (x || '').replace(/\\s+/g, ' ').trim();
+  const shown = flat(document.body ? document.body.innerText : '');     // text already visible on the page
+  const add = (el, kind, attr, value) => {
+    const v = (value || '').trim();
+    if (v.length < 2 || v.length > 600) return;
+    if (shown.includes(flat(v))) return;      // same words are on screen -> not hidden text (checked there)
+    nodes.push(el); items.push({ k: nodes.length - 1, kind, attr, value: v });
+  };
+  const t = document.querySelector('head > title');
+  if (t) add(t, 'meta', 'title', t.textContent);
+  for (const m of document.querySelectorAll('meta[name], meta[property]')) {
+    const n = (m.getAttribute('name') || m.getAttribute('property') || '').toLowerCase();
+    if (/^(description|keywords|og:title|og:description|twitter:title|twitter:description)$/.test(n)) add(m, 'meta', n, m.getAttribute('content'));
+  }
+  for (const el of document.querySelectorAll('body [alt], body [title], body [aria-label]')) {
+    for (const a of ['alt', 'title', 'aria-label']) if (el.hasAttribute(a)) add(el, 'attr', a, el.getAttribute(a));
+  }
+  const here = location.hostname.replace(/^www\\./, '');
+  const hidden = (el) => {
+    for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
+      const s = getComputedStyle(e);
+      if (s.display === 'none') return 'display:none';
+      if (s.visibility === 'hidden') return 'visibility:hidden';
+      if (parseFloat(s.opacity) <= 0.05) return 'opacity:0';
+    }
+    const s = getComputedStyle(el), r = el.getBoundingClientRect();
+    if (parseFloat(s.fontSize) <= 1) return 'font-size:' + s.fontSize;
+    if (r.right + scrollX <= 0 || r.bottom + scrollY <= 0) return '화면 밖 위치';
+    if (r.width <= 1 && r.height <= 1) return '크기 0';
+    return '';
+  };
+  for (const a of document.querySelectorAll('a[href]')) {
+    let u; try { u = new URL(a.getAttribute('href'), document.baseURI); } catch (e) { continue; }
+    if (!/^https?:$/.test(u.protocol)) continue;
+    const host = u.hostname.replace(/^www\\./, '');
+    if (host === here || host.endsWith('.' + here) || here.endsWith('.' + host)) continue;   // same site
+    const text = (a.innerText || '').trim();
+    const why = hidden(a) || (!text && !a.querySelector('img, svg') ? '보이는 글자 없음' : '');
+    if (!why) continue;
+    nodes.push(a); items.push({ k: nodes.length - 1, kind: 'link', attr: 'href', value: u.href,
+      text: (a.textContent || '').trim().slice(0, 300), title: a.getAttribute('title') || '', why });
+  }
+  window.__cwNodes = nodes;
+  return items.slice(0, 400);
+}"""
 
 def account_page(url: str) -> bool:
     """Login / account pages (same words the crawler skips in links)."""
@@ -1406,7 +1504,7 @@ def _skip_groups(images: list[dict]) -> dict[str, int]:
 # Scripts that always return an object/array (not None), with their form: "fn" is a
 # function taking the evaluate argument, "expr" a self-calling expression.
 _VALUE_JS = {COLLECT_JS: "expr", SELECTOR_JS: "fn", IFRAME_SEL_JS: "fn", LINKS_JS: "fn", EXPAND_JS: "fn",
-             IMG_JS: "fn", IMG_COLLECT_JS: "fn", CHALLENGE_JS: "fn"}
+             IMG_JS: "fn", IMG_COLLECT_JS: "fn", CHALLENGE_JS: "fn", HIDDEN_EXTRA_JS: "fn"}
 
 
 # Ad-tech and analytics networks: their requests never carry page content we inspect,

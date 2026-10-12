@@ -332,6 +332,13 @@ def _collapse(s: str) -> str:
     return " ".join(s.split())
 
 
+def _original(s: str) -> str:
+    """evidence_text: the collected text as it is (공식 요건 '정규화 전 원본 그대로'). Only the
+    whitespace before the first and after the last character is removed - that is the page's
+    indentation around the element, not part of the text."""
+    return s.strip()
+
+
 @dataclass
 class Candidate:
     index: int                 # record index used as location
@@ -501,7 +508,7 @@ def analyze_frame(nodes: list[dict], report_excluded: bool = True,
             for t, why in obf.items():
                 cands.append(_cand(u, t, by_i, rs, v, why, u))
             if not obf and visible is not None:
-                visible.append({"index": u, "evidence": _collapse(n["text"])[:500], "restored": _collapse(rs.text)[:500],
+                visible.append({"index": u, "evidence": _original(n["text"]), "restored": _collapse(rs.text)[:500],
                                 "ad_reasons": list(v.reasons), "ad_matches": _matches(v),
                                 "excluded_why": "숨김·위장(공식 4종 기법)이 확인되지 않아 공식 결과(result.json)에서 제외"})
 
@@ -542,7 +549,7 @@ def _is_composite(i: int, by_i: dict, children: dict, hrefs: dict) -> bool:
 def _cand(loc, t, by_i, rs, v, why, unit, scope=None) -> Candidate:
     return Candidate(
         index=loc, technique=t,
-        evidence=_collapse(by_i[loc]["text"])[:500],
+        evidence=_original(by_i[loc]["text"]),
         restored=_collapse(rs.text)[:500],
         ad_reasons=list(v.reasons) + list(scope or []), tech_reasons=list(why), unit=unit,
         changes=[{"kind": c.kind, "src": c.src, "dst": c.dst} for c in rs.changes][:20],
@@ -584,8 +591,37 @@ def _merge_pure_roots(cands, by_i, info, ancestors):
     for c in cands:
         if c.index in replace:
             c.index = replace[c.index]
-            c.evidence = _collapse(by_i[c.index]["text"])[:500]
+            c.evidence = _original(by_i[c.index]["text"])
     return cands
+
+
+# ------------------------------------------------------------------ text outside the page body
+def judge_attr(text: str):
+    """Text that only search engines / screen readers get (title, meta, alt, title=, aria-label):
+    the same ad rules as page text. Returns the Verdict when it is an ad, else None."""
+    raw = text.strip()
+    if len(_collapse(raw)) < 2:
+        return None
+    rs = restore(raw)
+    v = adjudge(raw, rs.text)
+    return v if v.is_ad else None
+
+
+_HREF_SPLIT = re.compile(r"[/._\-?=&:#]+")
+
+
+def judge_link(text: str, href: str):
+    """A link whose words are empty or hidden, leading to another site. It counts only when the
+    link's own words are not an ad (those are already judged as page text) and the address
+    adds the evidence (casino-xxx.example/join ...)."""
+    if judge_attr(text):
+        return None
+    words = _HREF_SPLIT.sub(" ", href.split("://", 1)[-1])
+    raw = (text + " " + words + " " + href).strip()
+    v = adjudge(raw, restore(raw).text)
+    if not v.is_ad or not (v.strong or v.weak):
+        return None
+    return v
 
 
 # ------------------------------------------------------------------ text in images (OCR)

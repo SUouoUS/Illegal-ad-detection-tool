@@ -23,6 +23,8 @@
     if (text !== undefined && text !== null) e.textContent = text;
     return e;
   };
+  // list rows and titles show one line; the 원문 block keeps the original text with its line breaks
+  const oneLine = (s) => (s || "").replace(/\s+/g, " ").trim();
   const mmss = (s) => {
     s = Math.max(0, Math.floor(s || 0));
     return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
@@ -207,9 +209,70 @@
   const frameNote = (f) => (f.frame_chain && f.frame_chain.length
     ? (f.frame_chain.length === 1 ? " · 삽입 프레임 안" : ` · ${f.frame_chain.length}단계 삽입 프레임 안`) : "");
 
+  // ------------------------------------------------------------ review (management)
+  const REVIEW = { confirmed: "광고 확인", false_positive: "오탐", unreviewed: "미검토" };
+  const EXTRA_KIND = { text: "텍스트 · 숨김 없음", seo: "검색엔진·속성 문구(화면에 안 보임)", link: "숨겨진 광고 링크" };
+  let reviews = {}, reviewKey = null;
+  const officialKey = (url, loc) => `${url}\u0000${loc}`;
+  const extraKey = (kind, url, loc) => `extra:${kind}\u0000${url}\u0000${loc}`;
+  const reviewOf = (k) => (reviews[k] && reviews[k].status) || "unreviewed";
+  function reviewBadge(k) {
+    const st = reviewOf(k);
+    return st === "unreviewed" ? null : el("span", "rv rv-" + st, REVIEW[st]);
+  }
+  function reviewCounts() {
+    if (!lastRec) return;
+    const keys = groups.map((g) => officialKey(g.url, g.location)).concat(extraRows.map(rowKey));
+    const c = { confirmed: 0, false_positive: 0, unreviewed: 0 };
+    keys.forEach((k) => { c[reviewOf(k)] += 1; });
+    $("review-counts").hidden = !keys.length;
+    $("review-counts").textContent = `검토: 광고 확인 ${c.confirmed} · 오탐 ${c.false_positive} · 미검토 ${c.unreviewed}`;
+  }
+  const rowKey = (row) => row.kind === "text" ? extraKey(row.item.kind || "text", row.item.url, row.item.location)
+    : extraKey("image", imgItems[row.i].page_url, imgItems[row.i].location || imgItems[row.i].selector);
+  function showReview(k) {
+    reviewKey = k;
+    const box = $("review-box");
+    box.hidden = !k || !lastRec;
+    if (box.hidden) return;
+    const st = reviewOf(k);
+    box.querySelectorAll("[data-status]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.status === st ? "true" : "false"));
+    $("review-memo").value = (reviews[k] && reviews[k].memo) || "";
+    $("review-note").textContent = reviews[k] && reviews[k].at
+      ? `${REVIEW[st]} · ${reviews[k].at.replace("T", " ").slice(0, 16)} 저장 · 결과 파일(result.json)은 바뀌지 않습니다.`
+      : "검토 표시는 점검자의 판단으로 따로 저장되며 결과 파일(result.json)은 바뀌지 않습니다.";
+  }
+  async function saveReview(status) {
+    if (!reviewKey || !lastRec) return;
+    const r = await fetch(`/api/scans/${lastRec.run_id}/reviews`, { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: reviewKey, status, memo: $("review-memo").value }) });
+    if (!r.ok) { $("review-note").textContent = "저장하지 못했습니다."; return; }
+    reviews = await r.json();
+    const k = reviewKey;
+    refreshBadges();
+    showReview(k);
+  }
+  function refreshBadges() {
+    const fresh = new Set((lastRec && lastRec.compare && lastRec.compare.new) || []);
+    const mark = (li, k) => {
+      li.querySelectorAll(".rv").forEach((x) => x.remove());
+      if (!k) return;
+      if (fresh.has(k)) li.querySelector(".r-types").append(el("span", "rv rv-new", "신규"));
+      const b = reviewBadge(k);
+      if (b) li.querySelector(".r-types").append(b);
+    };
+    $("results").querySelectorAll("li").forEach((li, i) => mark(li, groups[i] && officialKey(groups[i].url, groups[i].location)));
+    $("img-results").querySelectorAll("li").forEach((li, r) => mark(li, extraRows[r] && rowKey(extraRows[r])));
+    reviewCounts();
+  }
+
   function renderRun(rec) {
     lastRec = rec;
+    reviews = rec.reviews || {};
     groups = groupFindings(rec);
+    $("list-tools").hidden = false;
+    $("btn-csv").href = `/api/scans/${rec.run_id}/export.csv`;
+    $("btn-report").href = `/api/scans/${rec.run_id}/report`;
     const list = $("results");
     list.replaceChildren();
     $("counts").textContent = groups.length ? `의심 요소 ${groups.length}개 · 기법별 검출 ${rec.result.findings.length}건` : "";
@@ -229,7 +292,7 @@
       li.setAttribute("role", "option");
       li.setAttribute("aria-selected", "false");
       li.tabIndex = i === 0 ? 0 : -1;
-      li.append(el("span", "r-text", g.items[0].evidence_text));
+      li.append(el("span", "r-text", oneLine(g.items[0].evidence_text)));
       const types = el("span", "r-types");
       for (const it of g.items) types.append(el("span", "", TECH[it.technique] || it.technique));
       li.append(types);
@@ -255,6 +318,8 @@
     renderExcluded(rec);
     renderImages(rec);
     renderCollection(rec);
+    renderCompare(rec);
+    refreshBadges();
     if (groups.length) select(0);
     else if (extraRows.length) { if (extraRows[0].kind === "text") selectExtraText(0); else selectImage(extraRows[0].i, 0); }
     else clearDetail();
@@ -334,6 +399,24 @@
     $("sd-conc").replaceChildren(el("div", "", head), ...lines.map((x) => el("div", "", x)));
   }
 
+  // changes against the previous scan of the same address (computed by the server)
+  function renderCompare(rec) {
+    const c = rec.compare;
+    $("compare-box").hidden = !c;
+    if (!c) return;
+    const when = (c.prev_started_at || "").replace("T", " ").slice(0, 16);
+    $("compare-line").textContent = `이전 검사(${when}) 대비: 신규 ${c.new.length} · 사라짐 ${c.gone.length} · 확인 못 함 ${c.unknown.length} · 그대로 ${c.same}`;
+    const ul = $("compare-gone");
+    ul.replaceChildren();
+    for (const [label, xs] of [["사라짐", c.gone], ["확인 못 함", c.unknown]]) {
+      for (const g of xs.slice(0, 50)) {
+        const li = el("li", "", oneLine(g.evidence_text));
+        li.append(el("span", "x-why", ` — ${label} · ${g.구분} · ${g.url}`));
+        ul.append(li);
+      }
+    }
+  }
+
   function renderSkipped(rec) {
     const c = (rec.crawl && rec.crawl.skipped_count) || {};
     const parts = Object.entries(c).map(([k, n]) => `${k} ${n}개`);
@@ -398,6 +481,7 @@
 
   // ------------------------------------------------------------ detail
   function clearDetail() {
+    showReview(null);
     $("detail-empty").hidden = false;
     $("detail-body").hidden = true;
     $("img-detail").hidden = true;
@@ -425,7 +509,10 @@
     const list = $("img-results");
     list.replaceChildren();
     const n = (lv) => imgs.filter((x) => x.level === lv).length;
-    const bits = [`텍스트 ${texts.length}`];
+    const nk = (k) => texts.filter((t) => (t.kind || "text") === k).length;
+    const bits = [`텍스트 ${nk("text")}`];
+    if (nk("seo")) bits.push(`검색엔진·속성 문구 ${nk("seo")}`);
+    if (nk("link")) bits.push(`숨겨진 링크 ${nk("link")}`);
     if (o.enabled) bits.push(`이미지 의심 ${n("suspect")} · 불확실 ${n("uncertain")}`);
     $("img-counts").textContent = bits.join(" · ");
     const empty = $("img-empty");
@@ -439,8 +526,8 @@
       li.tabIndex = -1;
       if (row.kind === "text") {
         const t = row.item;
-        li.append(el("span", "r-text", t.evidence_text));
-        li.append(el("span", "r-types r-kind", "텍스트 · 숨김 없음"));
+        li.append(el("span", "r-text", oneLine(t.evidence_text)));
+        li.append(el("span", "r-types r-kind", EXTRA_KIND[t.kind || "text"] || "텍스트"));
         li.append(el("span", "r-path", (onePage ? "" : pathLabel(t.url, true) + " · ") + t.location));
         li.addEventListener("click", () => selectExtraText(r));
       } else {
@@ -498,13 +585,14 @@
   function selectExtraText(r) {
     markExtraRow(r);
     const t = extraRows[r].item;
+    showReview(rowKey(extraRows[r]));
     $("detail-empty").hidden = true;
     $("img-detail").hidden = true;
     $("detail-body").hidden = false;
-    $("d-title").textContent = t.evidence_text;
+    $("d-title").textContent = oneLine(t.evidence_text);
     $("d-title").title = t.evidence_text;
     $("d-type-label").textContent = "구분:";
-    $("d-types").textContent = "추가 의심 광고 · 숨김·위장 없음";
+    $("d-types").textContent = `추가 의심 광고 · ${EXTRA_KIND[t.kind || "text"] || "텍스트"}`;
     const same = !t.restored_text || t.restored_text === t.evidence_text;
     $("d-raw").textContent = t.evidence_text;
     $("d-restored-wrap").hidden = same;
@@ -546,6 +634,7 @@
     markExtraRow(row != null ? row : extraRows.findIndex((x) => x.kind === "image" && x.i === i));
     const im = imgItems[i];
     if (!im) return clearDetail();
+    showReview(extraKey("image", im.page_url, im.location || im.selector));
     $("detail-empty").hidden = true;
     $("detail-body").hidden = true;
     $("img-detail").hidden = false;
@@ -628,12 +717,13 @@
     if (focus && rows[i]) rows[i].focus();
     const g = groups[i];
     if (!g) return clearDetail();
+    showReview(officialKey(g.url, g.location));
     const f0 = g.items[0];
     $("detail-empty").hidden = true;
     $("detail-body").hidden = false;
 
     // title = short summary of the selected item; 원문 below keeps the full text
-    $("d-title").textContent = f0.evidence_text;
+    $("d-title").textContent = oneLine(f0.evidence_text);
     $("d-title").title = f0.evidence_text;
     $("d-types").textContent = g.items.map((x) => TECH[x.technique]).join(" · ");
     const same = !f0.restored_text || f0.restored_text === f0.evidence_text;
@@ -726,6 +816,33 @@
   });
 
   // ------------------------------------------------------------ help dialogs
+  $("review-box").querySelectorAll("[data-status]").forEach((b) => b.addEventListener("click", () => saveReview(b.dataset.status)));
+  $("review-memo").addEventListener("change", () => { if (reviewKey) saveReview(reviewOf(reviewKey)); });
+
+  const hist = $("dlg-history");
+  $("btn-history").addEventListener("click", async () => {
+    const tb = $("history-rows");
+    tb.replaceChildren(el("tr", "", ""));
+    hist.showModal();
+    let runs = [];
+    try { runs = await (await fetch("/api/scans", { cache: "no-store" })).json(); } catch (e) { runs = []; }
+    tb.replaceChildren();
+    if (!runs.length) tb.append(el("tr", "", "")).append(el("td", "", "저장된 검사 기록이 없습니다."));
+    for (const r of runs) {
+      const tr = el("tr", "history-row");
+      tr.tabIndex = 0;
+      tr.append(el("td", "", (r.started_at || "").replace("T", " ").slice(0, 16)));
+      tr.append(el("td", "", r.entry_url || ""));
+      tr.append(el("td", "", `${STATE[r.state] || r.state} · 공식 ${r.findings}건 · 전체 ${r.items}건`));
+      tr.append(el("td", "", r.items ? `${r.reviewed}/${r.items}` : "-"));
+      const open = () => { location.href = `/?run=${encodeURIComponent(r.run_id)}`; };
+      tr.addEventListener("click", open);
+      tr.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
+      tb.append(tr);
+    }
+  });
+  hist.querySelector("[data-close]").addEventListener("click", () => hist.close());
+
   const help = $("dlg-help"), types = $("dlg-types");
   let helpOpener = null;
   const openHelp = (focusEl) => {

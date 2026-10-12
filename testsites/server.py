@@ -21,6 +21,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 def start(site: str = "dev", port: int = 8811) -> http.server.ThreadingHTTPServer:
     if site == "crawl":
         from .crawl_site import Handler as handler  # dynamic pages
+    elif site == "spec":
+        from .spec_site import Handler as handler   # the official worked example (query pages)
     else:
         handler = functools.partial(Handler, directory=str(ROOT / site))
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
