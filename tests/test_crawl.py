@@ -101,3 +101,14 @@ def test_list_pages_are_not_near_duplicates():
     p = Policy("https://a.go.kr/list?bbs=3")
     assert not p.near_duplicate("https://a.go.kr/list?bbs=3&page=2")
     assert p.near_duplicate("https://a.go.kr/list?bbs=3&page=1")         # page 1 = the same list
+
+
+def test_account_words_in_any_query_value_are_low_value():
+    """2026-10-03 museum: M4301000000.do?schM=mypage_update (login required) was visited
+    because only action keys (mode=, act= ...) had their values checked."""
+    from clearweb.crawl import low_value_reason
+    assert low_value_reason("https://www.example.go.kr/MUSEUM/contents/M4301000000.do?schM=mypage_update") == "mypage"
+    assert low_value_reason("https://www.example.go.kr/a.do?menu=loginForm") == "login"
+    # broad words stay limited to action keys: report/view pages are content
+    assert low_value_reason("https://www.example.go.kr/M0611000000.do?catCustomType=report&catId=126") is None
+    assert low_value_reason("https://www.example.go.kr/board.do?type=report") == "report"   # action key, as before

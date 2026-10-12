@@ -1,0 +1,10 @@
+{
+  "_comment": "모집요강 붙임4 작성 예시의 4건. location은 예시 그대로(단, tr은 div의 직접 자식이 될 수 없어 표 안의 같은 요소를 가리키도록 table을 넣음). 채점기는 요소 동일성으로 비교함.",
+  "entry": "/board/list",
+  "answers": [
+    {"url": "/board/view?id=1024", "location": "div.notice-board > span.visually-hidden", "technique": "JAMO", "note": "자모 분해"},
+    {"url": "/board/view?id=1024", "location": "div.board-list > table > tbody > tr:nth-child(7) > td.title > a", "technique": "HOMOGLYPH", "note": "전각 영문"},
+    {"url": "/board/view?id=1180", "location": "div.article-body > p.desc > span", "technique": "TRANSPARENT", "note": "color:transparent"},
+    {"url": "/board/view?id=1180", "location": "iframe[src=\"{BASE}widget/notice\"] >>> div.wrap > span.hidden-link", "technique": "OFFSCREEN", "note": "left:-9999px, iframe 안"}
+  ]
+}

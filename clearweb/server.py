@@ -13,12 +13,12 @@ from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import VERSION
 from .paths import resource_dir, result_dir, runs_dir
-from . import ocr
+from . import manage, ocr
 from .scanner import Scan, ScanConfig
 
 mimetypes.add_type("font/woff2", ".woff2")
@@ -53,7 +53,19 @@ def info():
 @app.post("/api/scans")
 async def start(request: Request):
     body = await request.json()
-    url = str(body.get("url", "")).strip()
+    prev = None
+    if body.get("resume"):
+        # continue a scan that ended with unvisited links, from where it stopped
+        rid = str(body["resume"])
+        f = runs_dir() / rid / "scan.json"
+        if not rid.replace("-", "").isdigit() or not f.is_file():
+            raise HTTPException(404, "이어서 검사할 기록이 없습니다.")
+        prev = json.loads(f.read_text(encoding="utf-8"))
+        if not (prev.get("resume") or {}).get("pending"):
+            raise HTTPException(400, "이 검사에는 남은 링크가 없습니다.")
+        url = prev["entry_url"]
+    else:
+        url = str(body.get("url", "")).strip()
     s = urlsplit(url)
     if s.scheme not in ("http", "https") or not s.netloc:
         raise HTTPException(400, "http:// 또는 https:// 로 시작하는 주소를 입력하세요.")
@@ -61,7 +73,7 @@ async def start(request: Request):
         sc = _current["scan"]
         if sc is not None and sc.progress.state == "running":
             raise HTTPException(409, "이미 검사가 진행 중입니다.")
-        sc = Scan(url, _config(body))
+        sc = Scan(url, _config(body), resume=prev)
         th = threading.Thread(target=_run, args=(sc,), daemon=True)
         _current.update(scan=sc, thread=th)
         th.start()
@@ -84,9 +96,13 @@ def _config(body: dict) -> ScanConfig:
         cfg.max_depth = v
     if (v := num("max_pages", 1, 2000)) is not None:
         cfg.max_pages = v
-    if (v := num("budget_min", 1, 29, float)) is not None:
+    # the contest measures up to 30 minutes; longer limits are for practical use
+    if (v := num("budget_min", 1, 180, float)) is not None:
         cfg.total_budget_s = v * 60
     cfg.ocr_enabled = bool(opts.get("ocr"))
+    # pages at a time: "auto" (default) or a fixed number
+    if (v := num("concurrency", 1, 16)) is not None:
+        cfg.concurrency, cfg.concurrency_auto = v, False
     return cfg
 
 
@@ -94,7 +110,9 @@ def _config(body: dict) -> ScanConfig:
 def defaults():
     c = ScanConfig()
     ok, msg = ocr.engine_status()
+    from . import concurrency as conc
     return {"max_depth": c.max_depth, "max_pages": c.max_pages, "budget_min": round(c.total_budget_s / 60, 1),
+            "concurrency_plan": conc.plan(free_mb=conc.free_memory_mb()),
             "ocr": c.ocr_enabled, "ocr_available": ok, "ocr_message": msg}
 
 
@@ -146,11 +164,61 @@ def list_runs():
         if f.is_file():
             try:
                 r = json.loads(f.read_text(encoding="utf-8"))
-                out.append({k: r.get(k) for k in ("run_id", "entry_url", "state", "end_reason", "started_at", "elapsed_sec")}
-                           | {"findings": len(r.get("result", {}).get("findings", []))})
+                rv = manage.load_reviews(d)
+                out.append({k: r.get(k) for k in ("run_id", "entry_url", "state", "end_reason", "started_at", "elapsed_sec",
+                                                  "tool_version")}
+                           | {"findings": len(r.get("result", {}).get("findings", [])),
+                              "items": len(manage.rows(r, rv)),
+                              "reviewed": sum(1 for v in rv.values() if v.get("status") != "unreviewed")})
             except (OSError, ValueError):
                 continue
     return out
+
+
+def _run_dir(run_id: str) -> Path:
+    if not re.fullmatch(r"\d{8}-\d{6}", run_id):
+        raise HTTPException(404)
+    d = runs_dir() / run_id
+    if not (d / "scan.json").is_file():
+        raise HTTPException(404, "검사 기록이 없습니다.")
+    return d
+
+
+def _record(d: Path) -> dict:
+    return json.loads((d / "scan.json").read_text(encoding="utf-8"))
+
+
+@app.put("/api/scans/{run_id}/reviews")
+async def put_review(run_id: str, request: Request):
+    """The inspector's decision on one item. Kept apart: result files are never changed."""
+    d = _run_dir(run_id)
+    body = await request.json()
+    try:
+        reviews = manage.save_review(d, str(body.get("key", ""))[:4000], str(body.get("status", "")),
+                                     str(body.get("memo", "")))
+    except ValueError:
+        raise HTTPException(400, "검토 상태가 올바르지 않습니다.")
+    return reviews
+
+
+@app.get("/api/scans/{run_id}/export.csv")
+def export_csv(run_id: str):
+    d = _run_dir(run_id)
+    rec = _record(d)
+    prev = manage.find_previous(runs_dir(), rec)
+    return Response(manage.to_csv(rec, manage.load_reviews(d), manage.compare(rec, prev) if prev else None),
+                    media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="clearweb-{run_id}.csv"'})
+
+
+@app.get("/api/scans/{run_id}/report")
+def report(run_id: str):
+    from .scanner import page_summary
+    d = _run_dir(run_id)
+    rec = _record(d)
+    prev = manage.find_previous(runs_dir(), rec)
+    return HTMLResponse(manage.report_html(rec, manage.load_reviews(d), page_summary(rec.get("pages", [])),
+                                           manage.compare(rec, prev) if prev else None))
 
 
 @app.get("/api/scans/{run_id}")
@@ -160,7 +228,14 @@ def get_run(run_id: str):
     f = runs_dir() / run_id / "scan.json"
     if not f.is_file():
         raise HTTPException(404, "검사 기록이 없습니다.")
-    return JSONResponse(json.loads(f.read_text(encoding="utf-8")))
+    rec = json.loads(f.read_text(encoding="utf-8"))
+    rec["reviews"] = manage.load_reviews(f.parent)
+    prev = manage.find_previous(runs_dir(), rec)
+    rec["compare"] = manage.compare(rec, prev) if prev else None
+    # failure summary recomputed with the current categories (also for older records)
+    from .scanner import page_summary
+    rec["page_summary"] = page_summary(rec.get("pages", []))
+    return JSONResponse(rec)
 
 
 def _free_port(start: int, tries: int = 20) -> int:
