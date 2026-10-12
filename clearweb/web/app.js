@@ -231,6 +231,7 @@
   const rowKey = (row) => row.kind === "text" ? extraKey(row.item.kind || "text", row.item.url, row.item.location)
     : extraKey("image", imgItems[row.i].page_url, imgItems[row.i].location || imgItems[row.i].selector);
   function showReview(k) {
+    if (k !== reviewKey) flushMemo();     // save a memo still being typed for the previous item
     reviewKey = k;
     const box = $("review-box");
     box.hidden = !k || !lastRec;
@@ -242,15 +243,30 @@
       ? `${REVIEW[st]} · ${reviews[k].at.replace("T", " ").slice(0, 16)} 저장 · 결과 파일(result.json)은 바뀌지 않습니다.`
       : "검토 표시는 점검자의 판단으로 따로 저장되며 결과 파일(result.json)은 바뀌지 않습니다.";
   }
-  async function saveReview(status) {
+  // keepMemo: autosave while typing - do not rewrite the memo box under the cursor
+  async function saveReview(status, keepMemo) {
     if (!reviewKey || !lastRec) return;
-    const r = await fetch(`/api/scans/${lastRec.run_id}/reviews`, { method: "PUT", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: reviewKey, status, memo: $("review-memo").value }) });
-    if (!r.ok) { $("review-note").textContent = "저장하지 못했습니다."; return; }
-    reviews = await r.json();
     const k = reviewKey;
+    let r;
+    try {
+      r = await fetch(`/api/scans/${lastRec.run_id}/reviews`, { method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: k, status, memo: $("review-memo").value }) });
+    } catch (e) { r = null; }
+    if (!r || !r.ok) { if (reviewKey === k) $("review-note").textContent = "저장하지 못했습니다."; return; }
+    reviews = await r.json();
     refreshBadges();
-    showReview(k);
+    if (reviewKey !== k) return;
+    if (!keepMemo) { showReview(k); return; }
+    const at = reviews[k] && reviews[k].at;
+    $("review-note").textContent = at ? `메모 저장됨 · ${at.replace("T", " ").slice(0, 16)} · 결과 파일(result.json)은 바뀌지 않습니다.` : "메모를 비웠습니다.";
+  }
+  // memo autosave: shortly after typing stops, and right away when leaving the box / item / page
+  let memoTimer = null;
+  function flushMemo() {
+    if (!memoTimer) return;
+    clearTimeout(memoTimer);
+    memoTimer = null;
+    if (reviewKey) saveReview(reviewOf(reviewKey), true);
   }
   function refreshBadges() {
     const fresh = new Set((lastRec && lastRec.compare && lastRec.compare.new) || []);
@@ -817,7 +833,20 @@
 
   // ------------------------------------------------------------ help dialogs
   $("review-box").querySelectorAll("[data-status]").forEach((b) => b.addEventListener("click", () => saveReview(b.dataset.status)));
-  $("review-memo").addEventListener("change", () => { if (reviewKey) saveReview(reviewOf(reviewKey)); });
+  $("review-memo").addEventListener("input", () => {
+    if (!reviewKey) return;
+    clearTimeout(memoTimer);
+    $("review-note").textContent = "메모 입력 중…";
+    memoTimer = setTimeout(() => { memoTimer = null; saveReview(reviewOf(reviewKey), true); }, 700);
+  });
+  $("review-memo").addEventListener("change", flushMemo);
+  window.addEventListener("pagehide", () => {     // closing the tab while typing: send without waiting
+    if (!memoTimer || !reviewKey || !lastRec) return;
+    clearTimeout(memoTimer);
+    memoTimer = null;
+    fetch(`/api/scans/${lastRec.run_id}/reviews`, { method: "PUT", keepalive: true, headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: reviewKey, status: reviewOf(reviewKey), memo: $("review-memo").value }) });
+  });
 
   const hist = $("dlg-history");
   $("btn-history").addEventListener("click", async () => {

@@ -38,6 +38,7 @@ $dist = Join-Path $root "$Out\ClearWeb"
 Copy-Item docs\MANUAL.md (Join-Path $dist "사용설명서.md")
 Copy-Item LICENSE (Join-Path $dist "LICENSE.txt")
 Copy-Item clearweb\web\fonts\LICENSE-Pretendard.txt (Join-Path $dist "LICENSE-Pretendard.txt")
+Copy-Item THIRD_PARTY_NOTICES.txt (Join-Path $dist "THIRD_PARTY_NOTICES.txt")
 foreach ($f in @("result.json", "result_extra.json", "runs")) { $p = Join-Path $dist $f; if (Test-Path $p) { Remove-Item -Recurse -Force $p } }
 
 Write-Host "[5/5] zip"

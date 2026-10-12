@@ -6,7 +6,7 @@ ClearWeb\
   ClearWeb.exe            실행 파일 (더블클릭)
   _internal\              파이썬 런타임, 라이브러리, 화면 파일, 규칙 파일, 페이지 수집 스크립트, Playwright 드라이버
   browsers\               Chromium(headless shell) — 검사에 쓰는 브라우저
-  사용설명서.md, LICENSE.txt, LICENSE-Pretendard.txt
+  사용설명서.md, LICENSE.txt, LICENSE-Pretendard.txt, THIRD_PARTY_NOTICES.txt(오픈소스 고지)
   result.json             (검사 후 생성) 적격평가용 결과
   result_extra.json       (이미지 검사를 켠 검사 후 생성) 추가 탐지 결과
   runs\                   (검사 후 생성) 화면용 검사 기록과 이미지 미리보기

@@ -1,0 +1,57 @@
+ClearWeb 오픈소스 구성 요소 고지 (Third-Party Notices)
+==========================================================
+
+ClearWeb 자체 코드는 MIT 라이선스입니다(LICENSE.txt).
+배포본에는 아래 오픈소스 구성 요소가 함께 들어 있으며, 각 구성 요소는 해당 라이선스를 따릅니다.
+버전은 배포본을 만든 개발 환경 기준입니다(2026-10-12 확인).
+
+1. 실행 환경
+--------------------------------------------------------------------------
+Python 3.13.14              PSF-2.0          https://www.python.org/
+PyInstaller 부트로더         GPL-2.0-or-later (부트로더 예외 조항: 이 부트로더로 만든 실행 파일은
+                            어떤 라이선스로든 배포 가능)   https://pyinstaller.org/
+
+2. 브라우저 자동화
+--------------------------------------------------------------------------
+Playwright for Python 1.63.0  Apache-2.0      https://github.com/microsoft/playwright-python
+Playwright 드라이버(Node.js 포함)  Apache-2.0 외  원문: _internal/playwright/driver/package/LICENSE,
+                            NOTICE, ThirdPartyNotices.txt, _internal/playwright/driver/LICENSE
+Chromium(headless shell)      BSD-3-Clause 외  원문: browsers/chromium_headless_shell-*/chrome-headless-shell-win64/LICENSE.headless_shell
+                            https://www.chromium.org/
+FFmpeg(Playwright 빌드)       LGPL-2.1          원문: browsers/ffmpeg-*/COPYING.LGPLv2.1  https://ffmpeg.org/
+                            (Playwright가 함께 설치, ClearWeb은 사용하지 않음)
+greenlet 3.5.6                MIT AND PSF-2.0 https://greenlet.readthedocs.io
+pyee 13.0.1                   MIT             https://github.com/jfhbrook/pyee
+
+3. 로컬 화면 서버
+--------------------------------------------------------------------------
+FastAPI 0.141.1               MIT             https://github.com/fastapi/fastapi
+Starlette 1.7.0               BSD-3-Clause    https://github.com/Kludex/starlette
+Pydantic 2.13.5               MIT             https://github.com/pydantic/pydantic
+pydantic-core 2.46.5          MIT             https://github.com/pydantic/pydantic
+annotated-types 0.8.0         MIT             https://github.com/annotated-types/annotated-types
+annotated-doc 0.0.5           MIT             https://github.com/fastapi/annotated-doc
+typing-inspection 0.4.4       MIT             https://github.com/pydantic/typing-inspection
+typing_extensions 4.16.0      PSF-2.0         https://github.com/python/typing_extensions
+AnyIO 4.15.1                  MIT             https://github.com/agronholm/anyio
+idna 3.20                     BSD-3-Clause    https://github.com/kjd/idna
+Uvicorn 0.54.0                BSD-3-Clause    https://github.com/Kludex/uvicorn
+h11 0.16.0                    MIT             https://github.com/python-hyper/h11
+Click 8.5.0                   BSD-3-Clause    https://github.com/pallets/click
+colorama 0.4.6                BSD-3-Clause    https://github.com/tartley/colorama
+
+4. 이미지 속 글자 검사(선택 기능)
+--------------------------------------------------------------------------
+Pillow 12.3.0                 MIT-CMU         https://python-pillow.org/
+PyWinRT (winrt-runtime, winrt-Windows.Media.Ocr, winrt-Windows.Graphics.Imaging,
+  winrt-Windows.Storage.Streams, winrt-Windows.Foundation,
+  winrt-Windows.Foundation.Collections, winrt-Windows.Globalization) 3.2.1
+                              MIT             https://github.com/pywinrt/pywinrt
+글자 인식 엔진은 Windows에 내장된 Windows.Media.Ocr이며 배포본에 포함하지 않습니다.
+
+5. 글꼴
+--------------------------------------------------------------------------
+Pretendard (Regular, Bold)    SIL Open Font License 1.1   원문: LICENSE-Pretendard.txt
+                              https://github.com/orioncactus/pretendard
+
+라이선스 이름은 SPDX 표기입니다. 원문은 위 링크 또는 배포본에 함께 들어 있는 파일에서 확인할 수 있습니다.
