@@ -8,10 +8,10 @@ ClearWeb\
   browsers\               Chromium(headless shell) — 검사에 쓰는 브라우저
   사용설명서.md, LICENSE.txt, LICENSE-Pretendard.txt, THIRD_PARTY_NOTICES.txt(오픈소스 고지)
   result.json             (검사 후 생성) 적격평가용 결과
-  result_extra.json       (이미지 검사를 켠 검사 후 생성) 추가 탐지 결과
+  result_extra.json       (검사 후 항상 생성) 추가 탐지 결과
   runs\                   (검사 후 생성) 화면용 검사 기록과 이미지 미리보기
 ```
-크기: 폴더 약 420MB, zip 약 176MB(2026-09-30 빌드 기준). Python 설치가 필요 없도록 런타임을 포함합니다.
+크기: 폴더 약 421MB, zip 약 176MB(2026-10-22, 0.2.3 빌드 기준). Python 설치가 필요 없도록 런타임을 포함합니다.
 
 ## 빌드 환경
 - Windows 11, Python 3.13, 저장소 최상위에 가상환경 `.venv`
@@ -52,9 +52,15 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 1. zip을 개발 폴더가 아닌 곳에 풀기
 2. `ClearWeb.exe` 더블클릭 → 콘솔 창에 화면 주소 표시, 기본 브라우저가 열림(8765가 사용 중이면 다음 빈 포트)
 3. 로컬 테스트 사이트 또는 점검 대상 주소로 검사 → `ClearWeb.exe`와 같은 폴더에 `result.json` 생성 확인
-4. '검사 설정'에서 이미지 속 글자 검사를 켜고 검사 → `result_extra.json` 생성 확인, 다시 끄고 검사 → 이전 `result_extra.json`이 남지 않는지 확인
+4. 검사마다 `result_extra.json`이 함께 새로 생성되는지 확인(추가 탐지가 없으면 `findings: []`). '검사 설정'에서 이미지 속 글자 검사를 켜고 검사 → 이미지 결과(IMAGE_TEXT_AD)가 들어가는지 확인
 5. 검사 중 '중단' → '중단됨' 표시와 `result.json` 생성 확인
 6. 화면 없이: `ClearWeb.exe scan <주소> [--no-follow] [--ocr]`
+
+## 검증 기록 (2026-10-22, 0.2.3 빌드)
+- zip을 `%TEMP%\cw\pkg023`에 풀고 PATH를 `C:\Windows\System32;C:\Windows`로만 둔 상태(Python 없음)에서 실행.
+- 화면 없이(`ClearWeb.exe scan`): 로컬 테스트 사이트 5개 결과가 개발 환경과 같음 — dev 16/16(제출 17), crawl 10/10, fp 4/4, eval 24/25, 공고 예시 재현 4/4. 결과 파일 BOM 없음·스키마 오류 0, `tool_version` 0.2.3.
+- 화면 실행(`ClearWeb.exe serve --no-browser`, 더블클릭과 같은 서버): 검사 완료, 결과 파일이 실행 파일 폴더에 생성, 메모 자동 저장(새로고침 후 유지), CSV·보고서 열림, 화면 스크립트 오류 0. 배포본에 `THIRD_PARTY_NOTICES.txt` 포함 확인.
+- **미검증**: Python이 설치되지 않은 별도 Windows PC.
 
 ## 검증 기록 (2026-09-30, 커밋 094f743 빌드)
 - 환경: 개발 PC(Windows 11 Pro 10.0.26200, 한국어). zip을 `%TEMP%\ClearWebTest-…\ClearWeb`에 풀고, PATH에서 Python 관련 경로를 뺀 상태로 실행.

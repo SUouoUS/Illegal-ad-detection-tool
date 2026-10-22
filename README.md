@@ -1,10 +1,10 @@
 # ClearWeb — 공공 웹사이트 불법광고 점검 도구
 
 공공 웹사이트에 숨기거나 변형해 심어 둔 불법광고(도박·성인·불법대출 등)를 찾아, 발견 위치와 판단 근거를 보여주는 점검 도구입니다.
-「공공 웹사이트 불법광고 탐지 도구 개발 공모전」(행정안전부·한국지능정보사회진흥원) 출품을 목표로 개발 중입니다.
+「공공 웹사이트 불법광고 탐지 도구 개발 공모전」(행정안전부·한국지능정보사회진흥원) 출품작입니다. 버전 0.2.3.
 
-> 현재 상태: 개발 중. Windows 11 개발 환경(Python)에서만 실행을 확인했으며, Windows 실행 파일(배포 패키지)은 아직 없습니다.
-> 이 브랜치(`feature/image-ocr`)는 `main`에 이미지 속 글자 검사와 추가 의심 광고 목록을 더한 검토용 브랜치입니다.
+> **Windows 실행 파일**: 배포 zip(`ClearWeb-<버전>-win64.zip`)을 풀고 `ClearWeb.exe`를 실행합니다. Python 설치가 필요 없습니다.
+> 사용법은 [사용설명서](docs/MANUAL.md), 빌드 방법은 [실행/빌드 매뉴얼](docs/BUILD.md)을 보세요.
 
 ## 주요 기능
 - **필수 탐지 4종**
@@ -21,14 +21,17 @@
 - **추가 의심 광고**: 광고로 의심되지만 공식 4종 기법이 없는 문구는 공식 결과와 분리해 화면과 검사 기록에 참고 항목으로 보여주고, 제외한 이유를 함께 표시합니다.
 - **수집 요약**: ‘검사 상세’에서 본문 수집 여부와 이미지·OCR 처리 건수를 확인할 수 있어, 결과 0건이 ‘검사하지 못함’인지 ‘광고 없음’인지 구분됩니다.
 - **이미지 속 글자 검사(선택, 기본 꺼짐)**: 방문한 페이지(프레임 포함)의 `<img>` 글자를 Windows 내장 OCR(Windows.Media.Ocr)로 읽어 한 문구 영역 단위로 광고성을 판단합니다(광고 의심 / 불확실). 모델을 내려받지 않으며, OCR 결과로 자모 분해·닮은꼴 기법을 판정하지 않습니다.
-- 외부 AI API 없이 CPU만 사용합니다.
+- **추가 탐지 유형 4종**(`result_extra.json`): 숨김 없이 노출된 광고(`VISIBLE_AD`), 제목·meta·alt 등에만 넣은 광고 문구(`SEO_SPAM`), 숨겨진 광고 사이트 링크(`HIDDEN_LINK`), 이미지 속 광고 글자(`IMAGE_TEXT_AD`, 선택).
+- **결과 관리**: 항목별 검토 표시(광고 확인·오탐·미검토)와 메모(자동 저장), CSV 내보내기, 인쇄·PDF용 보고서, 검사 기록 다시 열기, 같은 주소의 이전 검사와 비교(신규·사라짐·확인 못 함), 남은 링크부터 이어서 검사.
+- **동시 처리 자동 조절**: PC의 논리 프로세서 수·남은 메모리·처리 속도를 보고 동시에 여는 페이지 수를 조절합니다.
+- 외부 AI API·외부 서버·GPU 없이 실행 PC의 CPU만 사용합니다(API 키·이용 비용 없음).
 
 ## 결과 파일
 | 파일 | 위치 | 내용 |
 |---|---|---|
 | `result.json` | 프로그램 폴더(개발 환경에서는 저장소 최상위) | 공식 스키마의 적격평가용 결과. 탐지 0건·중단·로딩 실패여도 항상 생성(UTF-8, BOM 없음) |
-| `result_extra.json` | `result.json`과 같은 폴더 | 추가 탐지(이미지 속 글자 ‘광고 의심’). `technique: "ETC"`, `extra_finding` 사용. 이미지 검사를 켜고 OCR이 실행된 경우에만 생성 |
-| `runs/<검사시각>/scan.json` | 저장소 최상위 `runs/` | 화면용 상세 기록(페이지별 상태, 판단 근거, 추가 의심 광고, 이미지 처리 결과, 수집 요약) |
+| `result_extra.json` | `result.json`과 같은 폴더 | 추가 탐지 유형 4종. `technique: "ETC"`, `extra_finding` 사용. 검사마다 항상 생성(없으면 `findings: []`) |
+| `runs/<검사시각>/scan.json` | 프로그램 폴더의 `runs/` | 화면용 상세 기록(페이지별 상태, 판단 근거, 추가 의심 광고, 이미지 처리 결과, 수집 요약) |
 
 ## 설치 (Windows 11, 개발 환경)
 ```powershell
@@ -51,10 +54,12 @@ python -m venv .venv
 정답이 있는 로컬 테스트 사이트와 채점 도구가 포함되어 있습니다. 채점은 공식 규칙대로 URL·요소·기법이 모두 맞아야 정답으로 셉니다.
 
 ```powershell
-# 1) 테스트 사이트 켜기 (dev: 은닉 4종·iframe / crawl: 하위 페이지·게시판·함정 링크 / fp: 오탐 회귀)
+# 1) 테스트 사이트 켜기 (dev: 은닉 4종·iframe / crawl: 하위 페이지·게시판·함정 링크 / fp: 오탐 회귀
+#    / eval: 별도 평가 / spec: 공고 result.json 작성 예시 재현 / ocr·eval_ocr: 이미지 속 글자)
 .venv\Scripts\python -m testsites.server --site dev   --port 8811
 .venv\Scripts\python -m testsites.server --site crawl --port 8821
 .venv\Scripts\python -m testsites.server --site fp    --port 8831
+#    (eval 8851, spec 8871, ocr 8841, eval_ocr 8861도 같은 방식)
 
 # 2) 검사 후 채점 (예: dev)
 .venv\Scripts\python -m clearweb scan http://127.0.0.1:8811/
@@ -67,6 +72,10 @@ python -m venv .venv
 
 # 4) 단위 테스트
 .venv\Scripts\python -m pytest -q tests
+
+# 5) 7개 테스트 사이트를 모두 켠 뒤 한 번에 검사·채점, 두 결과 비교
+.venv\Scripts\python toolsegression.py run <출력폴더>
+.venv\Scripts\python toolsegression.py compare <이전 출력> <새 출력>
 ```
 테스트 사이트는 개발자가 직접 만든 것이라, 이 점수는 일반화 성능의 근거가 아닙니다.
 
@@ -81,26 +90,28 @@ clearweb/          탐지 도구 본체
   scanner.py         브라우저 제어, 페이지·프레임 순회, 결과 저장
   result_writer.py   result.json·result_extra.json 생성과 스키마 검사
   ocr.py             이미지 준비·Windows OCR 호출·문구 영역 구분
+  manage.py          검토 기록·CSV·보고서·이전 검사 비교
+  concurrency.py     동시 처리 자동 조절
   server.py, web/    로컬 화면
   rules/ad_rules.json  광고성 판단 규칙
 testsites/         정답이 있는 로컬 테스트 사이트
 tools/score.py     공식 규칙 기반 채점 도구
 tools/score_ocr.py OCR 추출·판정 채점 도구
+tools/regression.py 7개 테스트 사이트 일괄 검사·채점·비교
+packaging/         Windows 배포본 빌드(PyInstaller)
 tests/             단위 테스트
-docs/              사용설명서(MANUAL.md), 진행 상황(PROGRESS.md), 규격 메모와 가정(SPEC_NOTES.md)
+docs/              사용설명서(MANUAL.md), 실행/빌드 매뉴얼(BUILD.md), 진행 상황(PROGRESS.md), 규격 메모와 가정(SPEC_NOTES.md),
+                   공고 요구사항 점검표(REQUIREMENTS_CHECK.md), 평가 보고서(EVAL_REPORT.md)
 ```
 
-## 브랜치
-- `main`: 필수 4종 탐지, 하위 페이지 탐색, 로컬 화면, 테스트 사이트
-- `feature/image-ocr` (현재 브랜치): `main` + 방문한 페이지의 이미지 속 글자 검사(선택 기능, Windows 내장 OCR), 추가 의심 광고 목록, 수집 요약, 사용설명서. 검토 중이며 아직 `main`에 합치지 않았습니다.
-
 ## 알려진 한계
-- 공식 4종 기법 없이 그대로 보이는 광고 문구는 `result.json`에 넣지 않습니다(공식 규격 기준).
+- 공식 4종 기법 없이 그대로 보이는 광고 문구는 `result.json`에 넣지 않고 `result_extra.json`(`VISIBLE_AD`)에 넣습니다(공식 규격 기준).
 - 스크립트 함수로만 이동하는 게시판 링크는 찾지 못할 수 있습니다.
 - 보안 확인(봇 차단) 화면을 띄우는 사이트는 검사할 수 없으며, 우회하지 않습니다(명확한 근거가 있을 때 ‘보안 확인 차단’으로 표시).
 - 이미지 검사는 방문한 페이지와 그 안의 프레임에 있는 `<img>`의 글자만 읽습니다. CSS 배경 이미지, canvas, 동영상, 광고 네트워크 광고는 검사하지 않고, 그림 자체의 의미는 판단하지 않습니다. 자모 분해·전각 문자 이미지는 안정적인 인식을 보장하지 못합니다.
-- OCR은 Windows 전용이며, 한국어 OCR 구성 요소가 없는 PC와 배포 실행 파일에서는 아직 확인하지 않았습니다.
+- OCR은 Windows 전용이며, 한국어 OCR 구성 요소가 없는 PC에서는 확인하지 않았습니다.
+- 배포본은 개발 PC에서 Python을 PATH에서 뺀 상태로만 확인했고, Python이 설치되지 않은 별도 PC에서는 확인하지 않았습니다.
 - 공식 규격에서 확정되지 않은 부분의 가정은 `docs/SPEC_NOTES.md`에 정리했습니다.
 
 ## 라이선스
-[MIT](LICENSE). 화면 글꼴 Pretendard는 SIL Open Font License를 따릅니다(`clearweb/web/fonts/LICENSE-Pretendard.txt`).
+[MIT](LICENSE). 화면 글꼴 Pretendard는 SIL Open Font License를 따릅니다(`clearweb/web/fonts/LICENSE-Pretendard.txt`). 배포본에 포함된 오픈소스 구성 요소는 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)에 정리했습니다.
